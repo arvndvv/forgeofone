@@ -1,0 +1,46 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --parchment: #f2e2b9;
+  --parchment-dark: #e6cf9c;
+  --ink: #3b2a14;
+  --ink-soft: #5a4023;
+  --wood: #6b4423;
+  --wood-dark: #3d2817;
+  --wood-light: #8b5a2b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background-color: #0d1210;
+  color: #e7e2d6;
+  font-family: 'Pixelify Sans', sans-serif;
+  font-size: 17px;
+}
+
+.font-title {
+  font-family: 'Press Start 2P', cursive;
+  line-height: 1.5;
+}
+
+input {
+  font-family: 'Pixelify Sans', sans-serif;
+}
+
+.game-shell { height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+.game-hud, .game-tabs, .quest-banner { flex-shrink: 0; }
+.game-main { flex: 1; min-height: 0; overflow-y: auto; }
+.world-main { flex: 1; min-height: 0; overflow: hidden; display: flex; }
+.game-shell-world .quest-banner { padding-top: 6px; }
+@media (max-height: 700px) {
+  .game-shell-world .game-hud { padding-top: 5px; padding-bottom: 5px; }
+  .game-shell-world .game-tabs { padding-top: 4px; padding-bottom: 4px; }
+  .game-shell-world .quest-banner { padding-top: 4px; }
+  .game-shell-world .quest-banner > button { padding-top: 3px; padding-bottom: 3px; }
+}
