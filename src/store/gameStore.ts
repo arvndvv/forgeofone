@@ -3,6 +3,7 @@ import { conversationReply } from '../services/localAI'
 import { getTile, getInteraction } from '../world/generation'
 import { facingForStep, type Facing } from '../world/facing'
 import type { Opportunity, ActiveGig, Business, LogEntry, Quest, RivalBusiness, ChatMessage, CollectedItem } from '../types/game'
+import type { ResidentOverride } from '../world/residents'
 
 // --- Currency ---------------------------------------------------------------
 // World runs on INR (rupees), not dollars. Reference costs below are written
@@ -162,6 +163,13 @@ interface GameState {
   contacts: Record<string, { name: string; role: string; meetings: number }>
   meetResident: (id: string, name: string, role: string) => void
 
+  // pinned-resident interaction state -- an explicit escape hatch from the
+  // "position is a pure function of the clock" rule, only for a resident a
+  // player has just talked to (see ResidentOverride in world/residents.ts).
+  // Not saved (the game has no save/load), keyed by resident.id.
+  residentOverrides: Record<string, ResidentOverride>
+  setResidentOverride: (id: string, override: ResidentOverride) => void
+
   // onboarding / quest system
   quests: Quest[]
   everOvercommitted: boolean
@@ -275,6 +283,7 @@ export const useGameStore = create<GameState>((set, get) => ({
   discoveries: {},
   inventory: [],
   contacts: {},
+  residentOverrides: {},
 
   quests: QUEST_DEFS.map((q) => ({ ...q, completed: false })),
   everOvercommitted: false,
@@ -292,7 +301,7 @@ export const useGameStore = create<GameState>((set, get) => ({
 
   createCharacter: (name) => {
     miraRequest++
-    set({ playerName: name, playerX: 0, playerY: 0, playerFacing: 'south', worldSeed: Math.floor(Math.random() * 1_000_000), discoveries: {}, inventory: [], contacts: {}, miraThinking: false, miraNotice: '' })
+    set({ playerName: name, playerX: 0, playerY: 0, playerFacing: 'south', worldSeed: Math.floor(Math.random() * 1_000_000), discoveries: {}, inventory: [], contacts: {}, residentOverrides: {}, miraThinking: false, miraNotice: '' })
     get().addLog(`${name} wakes up on day 1 with ${formatInr(STARTING_MONEY)} to their name, ready to start their working life.`)
     get()._completeQuest('first-day')
     get().startClock()
@@ -323,6 +332,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       discoveries: {},
       inventory: [],
       contacts: {},
+      residentOverrides: {},
       quests: QUEST_DEFS.map((q) => ({ ...q, completed: false })),
       everOvercommitted: false,
       assistantOpen: false,
@@ -464,6 +474,10 @@ export const useGameStore = create<GameState>((set, get) => ({
   meetResident: (id, name, role) => {
     const contacts = get().contacts
     set({ contacts: { ...contacts, [id]: { name, role, meetings: (contacts[id]?.meetings ?? 0) + 1 } } })
+  },
+
+  setResidentOverride: (id, override) => {
+    set({ residentOverrides: { ...get().residentOverrides, [id]: override } })
   },
 
   openAssistant: () => set({ assistantOpen: true }),

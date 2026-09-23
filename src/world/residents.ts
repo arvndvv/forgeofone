@@ -1,11 +1,68 @@
 import { hashCoord, getSettlement, getTile, type Point, type Settlement } from './generation'
 import { findPath } from './pathfinding'
 import { facingForStep, type Facing } from './facing'
-
-export type Activity = 'walking' | 'baking' | 'gardening' | 'selling' | 'repairing' | 'painting' | 'delivery' | 'reading' | 'resting' | 'chatting' | 'home'
-interface Stop { point: Point; activity: string; action: Activity; duration: number; path: Point[]; start: number; travel: number }
-export interface Resident { id: string; name: string; role: string; town: string; workplace: string; interest: string; sprite: number; home: Point; stops: Stop[]; duration: number; shift: number; lane: number }
-export interface ResidentPosition extends Point { resident: Resident; moving: boolean; facing: Facing; activity: string; action: Activity; visible: boolean }
+import tamPortrait from '../assets/game/characters/npc-villager4.png'
+import sa_por from '../assets/game/residents/saj/12.png'
+import sa_lie from '../assets/game/residents/sa_lie.webp'
+import sa_def from '../assets/game/residents/sa_def.webp'
+import sa_hor from '../assets/game/residents/sa_hor.webp'
+import sa_spre from '../assets/game/residents/sa_spre.webp'
+export type Activity = 'walking' | 'baking' | 'gardening' | 'selling' | 'repairing' | 'painting' | 'delivery' | 'reading' | 'resting' | 'chatting' | 'sleeping' | 'cooking' | 'playing' | 'home'
+/** Which drawn room a 'home' stop shows in HomeInterior.tsx -- picks the
+ *  furniture (bed, table, bookshelf, ...). 'custom' is a plain room with a
+ *  rug, for an activity that doesn't fit the others. */
+export type SceneKind = 'reading' | 'cooking' | 'resting' | 'sleeping' | 'playing' | 'custom'
+/** One thing a pinned resident does indoors, shown when the player looks
+ *  inside their home while they're in this part of their schedule. Also
+ *  used as a pool: the ambient/interaction system picks one at random
+ *  rather than assigning it a fixed time slot. `action` is what the
+ *  character is doing (drives which sprite shows, same as outdoors --
+ *  see Resident.sprites); `scene` only picks the room's furniture and has
+ *  no effect on the sprite. They're independent: two activities can share
+ *  a scene ('reading' and 'resting' both `scene: 'custom'`, say) or share
+ *  an action with a different backdrop. */
+export interface IndoorActivity { action: Activity; scene: SceneKind; label: string; description: string }
+interface Stop { point: Point; activity: string; action: Activity; duration: number; path: Point[]; start: number; travel: number; scene?: SceneKind; description?: string }
+/** A player- or LLM-driven change to where a pinned resident is and what
+ *  they're doing, overriding the ambient random pick until `until` (a
+ *  simMinutesTotal value). Created by "What will you do next?" / "Can I
+ *  come in?" in ResidentChat.tsx, stored in gameStore.residentOverrides,
+ *  and consumed by pinnedResidentPosition() below. Not persisted to disk
+ *  (the game has no save/load), so it's safe to keep purely in memory. */
+export interface ResidentOverride { indoors: boolean; action?: Activity; activity?: string; scene?: SceneKind; description?: string; until: number }
+export interface Resident {
+  id: string; name: string; role: string; town: string; workplace: string; interest: string; sprite: number
+  home: Point; stops: Stop[]; duration: number; shift: number; lane: number; backstory?: string
+  /** Chat portrait shown top-left of their chat box (see ResidentPortrait.tsx).
+   *  Import a transparent-background PNG and pass its path; left unset, the
+   *  chat falls back to a code-drawn portrait using `sprite`'s outfit. */
+  portrait?: string
+  /** Per-state world sprite, keyed by the Activity they're currently doing
+   *  ('baking', 'reading', 'sleeping', ...) -- the SAME lookup indoors and
+   *  outdoors (HomeInterior.tsx uses this too, keyed by `action`, never by
+   *  `scene`), with an optional `default` for anything not listed. When the
+   *  current action has no match here, it falls back to the normal
+   *  code-drawn character. Import transparent PNGs and give each a target
+   *  height of about 1.5 world tiles for a good fit; width scales to match
+   *  the image's own aspect ratio. */
+  sprites?: Partial<Record<Activity, string>> & { default?: string }
+  /** Set only for a pinned resident with a real home building (see
+   *  PinnedResident.indoorActivities) -- the id of that building, so
+   *  WorldView can find "who lives here" for a door the player is standing
+   *  at even while that resident is invisible (indoors) and not in the
+   *  visible list. */
+  homeBuildingId?: string
+  /** Pinned residents only, below -- mirrors of the matching PinnedResident
+   *  fields, copied onto the Resident so residentPosition() can compute a
+   *  position from (resident, simMinutes, override) alone, with no need to
+   *  look the PinnedResident config back up. See pinnedResidentPosition(). */
+  post?: Point
+  outdoorActivities?: Array<{ action: Activity; label: string }>
+  indoorActivities?: IndoorActivity[]
+  indoorShare?: number
+  bucketMinutes?: number
+}
+export interface ResidentPosition extends Point { resident: Resident; moving: boolean; facing: Facing; activity: string; action: Activity; visible: boolean; scene?: SceneKind; description?: string }
 const NAMES = ['Asha', 'Devon', 'Priya', 'Sam', 'Ravi', 'Elena', 'Tomas', 'Nisha', 'Marcus', 'Kavya', 'Mina', 'Arun', 'Isha', 'Leo', 'Noor', 'Kiran', 'Maya', 'Jules', 'Tara', 'Owen', 'Amir', 'Zoya', 'Remy', 'Anika']
 const ROLES = ['Baker', 'Gardener', 'Shopkeeper', 'Carpenter', 'Designer', 'Courier', 'Teacher', 'Bookseller']
 const JOBS: Array<{ action: Activity; description: string; interest: string }> = [
@@ -18,9 +75,102 @@ const JOBS: Array<{ action: Activity; description: string; interest: string }> =
   { action: 'reading', description: 'Preparing a lesson in the garden', interest: 'teaching and learning new skills' },
   { action: 'reading', description: 'Reading and sorting books for the stall', interest: 'stories and sharing what you know' },
 ]
+/** A fixed, named character with their own backstory, always found at one
+ *  building in one town. Add entries to PINNED_RESIDENTS below to place
+ *  them -- they sit alongside the 24 procedurally-generated neighbours and
+ *  4 travellers in that town without disturbing any of them.
+ *
+ *  Where they are and what they're doing is no longer a fixed schedule:
+ *  it's an ambient random pick (from outdoorActivities / indoorActivities)
+ *  that re-rolls every `changeMinutes`-ish, plus an optional player/LLM
+ *  override from talking to them (see ResidentChat.tsx, gameStore
+ *  residentOverrides). See ambientPinnedState() / pinnedResidentPosition(). */
+export interface PinnedResident {
+  /** Stable, unique id -- used to build this resident's id and as their
+   *  memory/contact key, so keep it the same once you've introduced them. */
+  id: string
+  name: string
+  role: string
+  /** Shown to the player and used in conversation, same as any neighbour. */
+  interest: string
+  /** A short background paragraph, folded into the local model's prompt
+   *  (see residentPrompt() in conversations.ts) so this character can
+   *  roleplay consistently. Optional -- leave blank for no special lore. */
+  backstory: string
+  /** Which building slot in the town's 4x4 grid they're based at (0-3, 0-3).
+   *  Usually a matching TOWN_LANDMARKS entry (generation.ts) so the
+   *  building itself has a custom name too, but any generated home or shop
+   *  slot works -- look up the town's `buildings` to see what's there. */
+  col: number
+  row: number
+  /** Outfit index, reused from the existing 8 neighbour looks (0-7). Still
+   *  used for the default chat portrait fallback even when `sprites` or
+   *  `portrait` below are set, so it's never wasted to leave it accurate. */
+  sprite: number
+  /** Pool of things they might be doing outdoors, at their post. The
+   *  ambient system (and "what will you do next?") picks one at random --
+   *  list a few for variety, or just one to keep them doing the same thing. */
+  outdoorActivities: Array<{ action: Activity; label: string }>
+  /** Pool of things they might be doing indoors, shown in HomeInterior.tsx.
+   *  Also picked at random, same as outdoorActivities. Leave unset (or
+   *  empty) to keep this character outdoors all day and skip "go inside"
+   *  entirely -- indoorShare is ignored in that case. */
+  indoorActivities?: IndoorActivity[]
+  /** Rough fraction of the time (0-1) they're indoors rather than at their
+   *  outdoor post, when the ambient system re-rolls. Default 0.35. Only a
+   *  player asking to come in, or the LLM deciding so, can move them
+   *  indoors/outdoors outside of these ambient rolls too. */
+  indoorShare?: number
+  /** [min, max] real minutes between ambient re-rolls of where they are and
+   *  what they're doing -- a random value in this range is picked once per
+   *  character (not re-rolled itself) so their rhythm stays consistent
+   *  across a playthrough. Default [90, 240]. */
+  changeMinutes?: [number, number]
+  /** Optional chat portrait -- import a transparent PNG and pass its path.
+   *  Left unset, the chat box shows a code-drawn portrait instead (using
+   *  `sprite` above), so this is a pure upgrade, never required. */
+  portrait?: string
+  /** Optional per-state world sprites, keyed by Activity -- both outdoor
+   *  ('baking' at the bakery) and indoor ('sleeping', 'cooking', ... from
+   *  indoorActivities[].action), plus an optional `default` used for any
+   *  state not listed. Import transparent PNGs. Left unset, they render as
+   *  the normal code-drawn character. */
+  sprites?: Partial<Record<Activity, string>> & { default?: string }
+}
+
+/** Keyed by region id "rx,ry" (Founders Green, the start town, is "0,0") --
+ *  the same key TOWN_LANDMARKS uses in generation.ts. Empty by default. */
+export const PINNED_RESIDENTS: Record<string, PinnedResident[]> = {
+  '1,0': [{
+    id: 'elder-tam', name: 'Tam', role: 'Retired shopkeeper', interest: 'old trade routes and giving advice',
+    backstory: 'Ran the first general store in Founders Green for thirty years before handing it down.',
+    col: 0, row: 0, sprite: 9,
+    outdoorActivities: [
+      { action: 'chatting', label: 'Sitting outside, happy to talk' },
+      { action: 'reading', label: 'Reading the paper on the porch' },
+      { action: 'gardening', label: 'Tending the small flower bed out front' },
+    ],
+    indoorActivities: [
+      { action: 'resting', scene: 'resting', label: 'Resting by the fire', description: 'Tam is settled into a worn armchair by the fire.' },
+      { action: 'reading', scene: 'reading', label: 'Going through old ledgers', description: 'Tam is sorting through yellowed trade-route ledgers.' },
+      { action: 'sleeping', scene: 'sleeping', label: 'Asleep', description: 'Tam is fast asleep.' },
+    ],
+    indoorShare: 0.4, changeMinutes: [90, 240],
+    portrait: sa_por, sprites: { chatting: sa_hor, reading: sa_spre, gardening: sa_hor, resting: sa_spre, sleeping: sa_lie, default: sa_def },
+  }],
+}
+
 function openSpot(point: Point, seed: number): Point {
   for (let r = 0; r < 5; r++) for (let y = -r; y <= r; y++) for (let x = -r; x <= r; x++) if (getTile(point.x + x, point.y + y, seed).walkable) return { x: point.x + x, y: point.y + y }
   return point
+}
+/** Turns a string id into a stable numeric seed for hashCoord(), so pinned
+ *  residents get their own independent-looking random stream without any
+ *  stored state -- same trick as the rest of the world generation. */
+function strseed(s: string): number {
+  let h = 0
+  for (let i = 0; i < s.length; i++) h = (Math.imul(h, 31) + s.charCodeAt(i)) | 0
+  return Math.abs(h)
 }
 const cache = new Map<string, Resident[]>()
 
@@ -76,15 +226,90 @@ export function getResidents(town: Settlement, seed: number): Resident[] {
       ],
     })
   }
+  for (const pinned of PINNED_RESIDENTS[town.id] ?? []) {
+    const building = town.buildings.find(b => b.id === `${town.id}:${pinned.col},${pinned.row}`)
+    if (!building) continue
+    const post = openSpot({ x: building.door.x, y: building.door.y + 1 }, seed)
+    const idSeed = strseed(pinned.id)
+    const [minC, maxC] = pinned.changeMinutes ?? [90, 240]
+    const bucketMinutes = Math.round(minC + hashCoord(idSeed, 0, seed + 41) * (maxC - minC))
+    residents.push({
+      id: `${town.id}:pinned:${pinned.id}`, name: pinned.name, role: pinned.role, town: town.name,
+      workplace: building.label, interest: pinned.interest, backstory: pinned.backstory, sprite: pinned.sprite,
+      portrait: pinned.portrait, sprites: pinned.sprites, homeBuildingId: building.id,
+      post, outdoorActivities: pinned.outdoorActivities, indoorActivities: pinned.indoorActivities,
+      indoorShare: pinned.indoorShare, bucketMinutes,
+      home: building.door, lane: 0, shift: 0, duration: 1440, stops: [],
+    })
+  }
+
   cache.set(key, residents)
   if (cache.size > 36) cache.delete(cache.keys().next().value!)
   return residents
 }
 
+/** Ambient, stateless random pick of a pinned resident's indoors/outdoors
+ *  and which pool entry, for a given moment. Time is sliced into fixed-
+ *  length buckets (resident.bucketMinutes, chosen once at construction) so
+ *  this is an O(1) direct computation -- no loop, no stored history -- and
+ *  the same simMinutes always re-derives the same answer, which is what
+ *  keeps revisiting/remounting side-effect-free for everyone except the
+ *  explicit override escape hatch below. */
+function ambientPinnedState(resident: Resident, simMinutes: number): { indoors: boolean; index: number } {
+  const bucketMinutes = resident.bucketMinutes ?? 180
+  const bucket = Math.floor(Math.max(0, simMinutes) / bucketMinutes)
+  const idSeed = strseed(resident.id)
+  const hasIndoor = !!resident.indoorActivities?.length
+  const indoorShare = hasIndoor ? resident.indoorShare ?? 0.35 : 0
+  const indoors = hashCoord(bucket, idSeed, 11) < indoorShare
+  const pool = indoors ? resident.indoorActivities : resident.outdoorActivities
+  const poolLen = Math.max(1, pool?.length ?? 1)
+  const index = Math.min(poolLen - 1, Math.floor(hashCoord(bucket, idSeed, 29) * poolLen))
+  return { indoors, index }
+}
+
+/** Position for a pinned resident with outdoorActivities set -- a separate
+ *  path from the Stop-based residentPosition() below, since these
+ *  characters aren't walking a route: they're ambiently idle at one of two
+ *  spots (post / home) and just change what they're doing there. A live
+ *  `override` (from talking to them) wins over the ambient pick until it
+ *  expires (override.until). */
+function pinnedResidentPosition(resident: Resident, simMinutes: number, override?: ResidentOverride): ResidentPosition {
+  // `action` is always the real thing they're doing (drives the sprite --
+  // see Resident.sprites), indoors or out. `scene` only ever affects which
+  // room HomeInterior draws (drawRoom) and is undefined outdoors -- it has
+  // no bearing on the sprite. `visible` (not `action`) is what says
+  // whether they're on the map, so an indoor action is never forced to a
+  // sentinel value the way it is for the Stop-based residents below.
+  let indoors: boolean, action: Activity, activity: string, scene: SceneKind | undefined, description: string | undefined
+  if (override && simMinutes < override.until) {
+    indoors = override.indoors
+    action = override.action ?? (indoors ? 'resting' : 'chatting')
+    activity = override.activity ?? (indoors ? 'Indoors' : 'Out and about')
+    scene = override.scene
+    description = override.description
+  } else {
+    const state = ambientPinnedState(resident, simMinutes)
+    indoors = state.indoors
+    if (indoors) {
+      const a = resident.indoorActivities?.[state.index]
+      action = a?.action ?? 'resting'; activity = a?.label ?? 'At home'; scene = a?.scene; description = a?.description
+    } else {
+      const a = resident.outdoorActivities?.[state.index]
+      action = a?.action ?? 'chatting'; activity = a?.label ?? 'Out and about'; scene = undefined; description = undefined
+    }
+  }
+  const point = indoors ? resident.home : (resident.post ?? resident.home)
+  return { resident, x: point.x + (indoors ? 0 : resident.lane), y: point.y, facing: 'south', moving: false, action, activity, visible: !indoors, scene, description }
+}
+
 /** Position is derived from the simulation clock, so revisiting/remounting a
  * region neither respawns residents nor resets their journeys. The final
- * circuit finishes at home before bedtime; pause freezes the same clock. */
-export function residentPosition(resident: Resident, simMinutes: number): ResidentPosition {
+ * circuit finishes at home before bedtime; pause freezes the same clock.
+ * `override` only ever applies to pinned residents (see pinnedResidentPosition) --
+ * ignored for everyone else. */
+export function residentPosition(resident: Resident, simMinutes: number, override?: ResidentOverride): ResidentPosition {
+  if (resident.outdoorActivities?.length) return pinnedResidentPosition(resident, simMinutes, override)
   const minute = ((simMinutes % 1440) + 1440) % 1440
   const elapsed = minute - resident.shift
   const cycles = Math.max(1, Math.floor((1200 - resident.shift) / resident.duration))
@@ -101,7 +326,15 @@ export function residentPosition(resident: Resident, simMinutes: number): Reside
       // Small lanes stay inside a walkable tile and keep walkers from stacking.
       return { ...base, x: a.x + (b.x - a.x) * fraction + (a.x === b.x ? resident.lane : 0), y: a.y + (b.y - a.y) * fraction + (a.y === b.y ? resident.lane : 0), moving: true, facing: facingForStep(b.x - a.x, b.y - a.y), action: 'walking', activity: `On my way · ${stop.activity.toLowerCase()}`, visible: true }
     }
-    return { ...base, ...stop.point, x: stop.point.x + resident.lane, activity: stop.activity, action: stop.action, visible: stop.action !== 'home' }
+    return { ...base, ...stop.point, x: stop.point.x + resident.lane, activity: stop.activity, action: stop.action, visible: stop.action !== 'home', scene: stop.scene, description: stop.description }
   }
   return base
+}
+
+/** Finds whoever (if anyone) has this exact building as their pinned home --
+ *  used to show "look inside" when the player is at a door, independent of
+ *  whether that resident is currently visible on the map (they won't be,
+ *  while indoors). Returns undefined for any building with no pinned resident. */
+export function residentForBuilding(town: Settlement, seed: number, buildingId: string): Resident | undefined {
+  return getResidents(town, seed).find(r => r.homeBuildingId === buildingId)
 }

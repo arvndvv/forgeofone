@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import { useGameStore } from '../store/gameStore'
-import { locationName, getTile, type Point } from '../world/generation'
+import { locationName, getTile, settlementAt, type Point } from '../world/generation'
 import { findPath } from '../world/pathfinding'
 import { createRenderer } from '../world/renderer'
-import type { ResidentPosition } from '../world/residents'
+import { residentPosition, residentForBuilding, type ResidentPosition, type ResidentOverride } from '../world/residents'
 import type { AnimalPosition } from '../world/wildlife'
 import { BIOMES, biomeAt } from '../world/regions'
 import { worldInteraction } from '../world/interactions'
 import { ResidentChat } from './ResidentChat'
 import { CollectionJournal } from './CollectionJournal'
+import { HomeInterior } from './HomeInterior'
 import { MiraPet } from './MiraPet'
 import './world.css'
 
@@ -19,6 +20,22 @@ const DIRECTIONS: Record<string, Point> = {
   ArrowLeft: { x: -1, y: 0 }, a: { x: -1, y: 0 }, ArrowRight: { x: 1, y: 0 }, d: { x: 1, y: 0 },
 }
 const isTyping = (target: EventTarget | null) => target instanceof HTMLElement && (!!target.closest('input, textarea, select, [contenteditable="true"], [role="dialog"]'))
+
+/** A pinned resident's home door, when they're currently indoors with an
+ *  indoor activity described -- ambient (see ambientPinnedState in
+ *  residents.ts) or from a live ResidentOverride from talking to them.
+ *  Undefined for every other door, including a pinned resident's own door
+ *  while they're out. Independent of the visible-people list, since an
+ *  indoor resident is invisible on the map by design. */
+function residentAtDoor(point: Point, seed: number, simMinutes: number, overrides: Record<string, ResidentOverride>): ResidentPosition | undefined {
+  const town = settlementAt(point.x, point.y, seed)
+  const building = town.buildings.find(b => b.door.x === point.x && b.door.y === point.y)
+  if (!building) return undefined
+  const resident = residentForBuilding(town, seed, building.id)
+  if (!resident) return undefined
+  const position = residentPosition(resident, simMinutes, overrides[resident.id])
+  return !position.visible && position.description ? position : undefined
+}
 
 export function WorldView({ onNavigate }: { onNavigate: (screen: WorldScreen) => void }) {
   const playerX = useGameStore(s => s.playerX), playerY = useGameStore(s => s.playerY)
@@ -33,26 +50,41 @@ export function WorldView({ onNavigate }: { onNavigate: (screen: WorldScreen) =>
   const [zoom, setZoom] = useState(1), [labels, setLabels] = useState(true), [areaInfo, setAreaInfo] = useState(false)
   const [selected, setSelected] = useState<ResidentPosition | null>(null)
   const [talking, setTalking] = useState<ResidentPosition | null>(null), [journal, setJournal] = useState(false), [animal, setAnimal] = useState<AnimalPosition | null>(null)
+  const [home, setHome] = useState<ResidentPosition | null>(null)
   const overlay = useRef(false), selection = useRef<ResidentPosition | null>(null)
-  overlay.current = !!talking || journal || areaInfo; selection.current = selected
+  const homeState = useRef<ResidentPosition | null>(null), talkingState = useRef<ResidentPosition | null>(null)
+  // Lets the render effect (mounted once, see below) react immediately when
+  // an overlay opens or closes, instead of finding out up to 200ms late.
+  const overlayWatcher = useRef<(() => void) | null>(null)
+  const wasOverlay = overlay.current
+  overlay.current = !!talking || journal || areaInfo || !!home; selection.current = selected
+  homeState.current = home; talkingState.current = talking
+  if (wasOverlay !== overlay.current) overlayWatcher.current?.()
   const livePeople = useRef<ResidentPosition[]>([])
   const [people, setPeople] = useState<ResidentPosition[]>([])
   const [ready, setReady] = useState(false), [error, setError] = useState(''), [message, setMessage] = useState('')
+  const simMinutes = useGameStore(s => s.simMinutesTotal)
+  const residentOverrides = useGameStore(s => s.residentOverrides)
   const target = worldInteraction({ x: playerX, y: playerY }, people, seed, playerFacing, selected?.resident.id)
   const person = selected ?? (target?.kind === 'resident' ? target.person : null)
   const interaction = target?.kind === 'place' ? target : null
   const discovered = interaction && !!discoveries[`${interaction.point.x},${interaction.point.y}`]
+  const insideNow = interaction ? residentAtDoor(interaction.point, seed, simMinutes, residentOverrides) : undefined
   settings.current = { zoom, labels, selected: person?.resident.id ?? null }
 
   function talkTo(person: ResidentPosition) {
     route.current = []; held.current = []; setAnimal(null); setAreaInfo(false)
-    setTalking(livePeople.current.find(p => p.resident.id === person.resident.id) ?? person)
+    setTalking(overlay.current ? person : (livePeople.current.find(p => p.resident.id === person.resident.id) ?? person))
   }
 
   function interact() {
     const s = useGameStore.getState()
     const target = worldInteraction({ x: s.playerX, y: s.playerY }, livePeople.current, s.worldSeed, s.playerFacing, selection.current?.resident.id)
     if (target?.kind === 'resident') { talkTo(target.person); return }
+    if (target?.kind === 'place') {
+      const inside = residentAtDoor(target.point, s.worldSeed, s.simMinutesTotal, s.residentOverrides)
+      if (inside) { setTalking(null); setAreaInfo(false); setHome(inside); return }
+    }
     if (target?.poi.screen) navigate.current(target.poi.screen as WorldScreen)
     else if (target) s.investigateHere()
     else setMessage('Walk near a neighbour and press E to talk.')
@@ -65,32 +97,71 @@ export function WorldView({ onNavigate }: { onNavigate: (screen: WorldScreen) =>
   }, [message])
 
   useEffect(() => {
-    let disposed = false, frame = 0
+    let disposed = false, frame = 0, overlayTimer = 0
     let anchor = performance.now(), lastMinute = useGameStore.getState().simMinutesTotal
     let wasRunning = useGameStore.getState().running, lastUi = 0
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
     createRenderer(canvas.current!, minimap.current!).then(render => {
       if (disposed) return
       renderer.current = render; setReady(true)
-      const loop = (now: number) => {
+      // Whoever's on screen while the world is paused (see below) -- the chat
+      // partner and/or the home we're looking inside -- should still show
+      // their current action live, not whatever it was the instant the panel
+      // opened. This is one resident's position, not the whole world, so a
+      // slow plain interval (no rAF, no canvas) is plenty and costs nothing.
+      const tickOverlay = () => {
         const state = useGameStore.getState()
-        if (state.simMinutesTotal !== lastMinute || state.running !== wasRunning) {
-          lastMinute = state.simMinutesTotal; wasRunning = state.running; anchor = now
-        }
-        // Smooth between the existing one-second simulation ticks. Clamp when
-        // the tab is suspended so the view cannot outrun the simulation clock.
-        const minutes = lastMinute + (state.running ? Math.min(1000, now - anchor) / 1000 * 25 / 60 : 0)
-        const visible = render.render({ seed: state.worldSeed, player: { x: state.playerX, y: state.playerY }, playerFacing: state.playerFacing, minutes, now, ...settings.current, route: route.current, reducedMotion, discoveries: state.discoveries })
-        livePeople.current = visible
-        if (now - lastUi > 150) {
-          lastUi = now; setPeople(visible)
-          setSelected(old => old ? visible.find(p => p.resident.id === old.resident.id) ?? null : null)
+        setTalking(old => old ? residentPosition(old.resident, state.simMinutesTotal, state.residentOverrides[old.resident.id]) : old)
+        setHome(old => old ? residentPosition(old.resident, state.simMinutesTotal, state.residentOverrides[old.resident.id]) : old)
+      }
+      const loop = (now: number) => {
+        // The world canvas is fully hidden behind HomeInterior/ResidentChat/
+        // the journal/area-info panels while one is open. Rather than just
+        // skipping the redraw, stop scheduling this loop entirely -- no rAF
+        // callback at all -- and hand off to a slow plain interval instead, so
+        // there is truly nothing per-frame running for a canvas nobody can
+        // see. onOverlayChange() below restarts this loop once it closes.
+        if (overlay.current) { frame = 0; if (!overlayTimer) overlayTimer = window.setInterval(tickOverlay, 200); return }
+        try {
+          const state = useGameStore.getState()
+          if (state.simMinutesTotal !== lastMinute || state.running !== wasRunning) {
+            lastMinute = state.simMinutesTotal; wasRunning = state.running; anchor = now
+          }
+          // Smooth between the existing one-second simulation ticks. Clamp when
+          // the tab is suspended so the view cannot outrun the simulation clock.
+          const minutes = lastMinute + (state.running ? Math.min(1000, now - anchor) / 1000 * 25 / 60 : 0)
+          const visible = render.render({ seed: state.worldSeed, player: { x: state.playerX, y: state.playerY }, playerFacing: state.playerFacing, minutes, now, ...settings.current, route: route.current, reducedMotion, discoveries: state.discoveries, residentOverrides: state.residentOverrides })
+          livePeople.current = visible
+          if (now - lastUi > 150) {
+            lastUi = now; setPeople(visible)
+            setSelected(old => old ? visible.find(p => p.resident.id === old.resident.id) ?? null : null)
+          }
+        } catch (e) {
+          // A draw error should never take the whole window down with it --
+          // log it and keep the loop (and the app) alive.
+          console.error('World render failed:', e)
         }
         frame = requestAnimationFrame(loop)
       }
+      // Whenever an overlay opens or closes, flip which of the two (rAF loop
+      // vs plain interval) is actually running.
+      const onOverlayChange = () => {
+        if (overlay.current) {
+          if (frame) { cancelAnimationFrame(frame); frame = 0 }
+          if (!overlayTimer) overlayTimer = window.setInterval(tickOverlay, 200)
+        } else {
+          if (overlayTimer) { clearInterval(overlayTimer); overlayTimer = 0 }
+          if (!frame) frame = requestAnimationFrame(loop)
+        }
+      }
+      overlayWatcher.current = onOverlayChange
       frame = requestAnimationFrame(loop)
     }).catch(e => { if (!disposed) setError(String(e.message)) })
-    return () => { disposed = true; cancelAnimationFrame(frame); renderer.current = null; livePeople.current = [] }
+    return () => {
+      disposed = true; overlayWatcher.current = null
+      cancelAnimationFrame(frame); if (overlayTimer) clearInterval(overlayTimer)
+      renderer.current = null; livePeople.current = []
+    }
   }, [seed])
 
   useEffect(() => {
@@ -110,8 +181,14 @@ export function WorldView({ onNavigate }: { onNavigate: (screen: WorldScreen) =>
     const onKeyDown = (event: KeyboardEvent) => {
       if (isTyping(event.target) || event.altKey || event.ctrlKey || event.metaKey || useGameStore.getState().assistantOpen) return
       const key = event.key.length === 1 ? event.key.toLowerCase() : event.key
-      if (key === 'Escape') { clear(); setSelected(null); setTalking(null); setJournal(false); setAreaInfo(false); setAnimal(null); return }
-      if (overlay.current) return
+      if (key === 'Escape') { clear(); setSelected(null); setTalking(null); setJournal(false); setAreaInfo(false); setAnimal(null); setHome(null); return }
+      if (overlay.current) {
+        // Inside a home, with no chat open yet, E still starts talking to
+        // whoever's in there -- same shortcut as outdoors, just aimed at
+        // the resident HomeInterior is showing rather than a nearby target.
+        if (homeState.current && !talkingState.current && key === 'e') { event.preventDefault(); if (!event.repeat) talkTo(homeState.current) }
+        return
+      }
       if (key === 'e') { event.preventDefault(); if (!event.repeat) interact(); return }
       if (!DIRECTIONS[key]) return
       event.preventDefault()
@@ -174,10 +251,12 @@ export function WorldView({ onNavigate }: { onNavigate: (screen: WorldScreen) =>
       <div className="world-location-chip">✦ {Math.abs(playerX) <= 3 && Math.abs(playerY) <= 3 ? 'Town square' : locationName(playerX, playerY, seed)}<span>{BIOMES[biomeAt(playerX, playerY, seed)].name} · {people.length} neighbours nearby</span></div>
       {message && <div className="world-toast" role="status">{message}</div>}
       <div className="world-dpad"><span />{pad('ArrowUp', '↑', 'Walk north')}<span />{pad('ArrowLeft', '←', 'Walk west')}<button title="Return to town square" aria-label="Return to town square" onClick={() => { route.current = []; held.current = []; setSelected(null); useGameStore.getState().returnToTown() }}>⌂</button>{pad('ArrowRight', '→', 'Walk east')}<span />{pad('ArrowDown', '↓', 'Walk south')}<span /></div>
-      {!talking && !journal && !areaInfo && (person ? <div className="world-interaction" data-interaction="resident" aria-live="polite">{selected && <button className="world-close" aria-label="Close resident details" onClick={() => setSelected(null)}>×</button>}<small>{target?.kind === 'resident' && target.person.resident.id === person.resident.id ? 'NEARBY · PRESS E TO TALK' : 'A NEIGHBOUR'}</small><strong>{person.resident.name} <span>· {person.resident.role}</span></strong><p>{person.activity}</p><button className="world-enter" onClick={() => talkTo(person)}>Talk{target?.kind === 'resident' && target.person.resident.id === person.resident.id && <kbd>E</kbd>}</button></div>
+      {!talking && !journal && !areaInfo && !home && (person ? <div className="world-interaction" data-interaction="resident" aria-live="polite">{selected && <button className="world-close" aria-label="Close resident details" onClick={() => setSelected(null)}>×</button>}<small>{target?.kind === 'resident' && target.person.resident.id === person.resident.id ? 'NEARBY · PRESS E TO TALK' : 'A NEIGHBOUR'}</small><strong>{person.resident.name} <span>· {person.resident.role}</span></strong><p>{person.activity}</p><button className="world-enter" onClick={() => talkTo(person)}>Talk{target?.kind === 'resident' && target.person.resident.id === person.resident.id && <kbd>E</kbd>}</button></div>
         : animal ? <div className="world-interaction"><button className="world-close" aria-label="Close animal details" onClick={() => setAnimal(null)}>×</button><small>A LITTLE LOCAL</small><strong style={{ textTransform: 'capitalize' }}>{animal.animal.kind}</strong><p>{animal.activity}</p></div>
+        : insideNow ? <div className="world-interaction" aria-live="polite"><small>COME ON IN</small><strong>{insideNow.resident.name}’s home</strong><p>{insideNow.activity}</p><button className="world-enter" onClick={() => setHome(insideNow)}>Look inside <kbd>E</kbd></button></div>
         : interaction && <div className="world-interaction" aria-live="polite"><small>{interaction.poi.screen ? 'COME ON IN' : discovered ? 'DISCOVERED' : 'A PLACE TO EXPLORE'}</small><strong>{interaction.poi.label}</strong>{discovered ? <p>{interaction.poi.item ? `${interaction.poi.item.name} is in your journal.` : interaction.poi.flavor}</p> : <button className="world-enter" onClick={interact}>{interaction.poi.screen ? 'Enter' : interaction.poi.item ? 'Explore & collect' : 'Look around'} <kbd>E</kbd></button>}</div>)}
-      {talking && <ResidentChat key={talking.resident.id} person={talking} onClose={() => { setTalking(null); canvas.current?.focus({ preventScroll: true }) }} />}
+      {home && <HomeInterior key={home.resident.id} person={home} crowded={!!talking} onClose={() => { setHome(null); setTalking(null); canvas.current?.focus({ preventScroll: true }) }} onTalk={() => talkTo(home)} />}
+      {talking && <ResidentChat key={talking.resident.id} person={talking} onClose={() => { setTalking(null); canvas.current?.focus({ preventScroll: true }) }} onEnter={position => { setTalking(null); setHome(position) }} />}
       {areaInfo && <aside className="world-area-info" id="world-area-info" role="dialog" aria-label="Around you" onKeyDown={e => { if (e.key === 'Escape') { setAreaInfo(false); canvas.current?.focus({ preventScroll: true }) } }}>
         <header><strong>Around you</strong><button autoFocus aria-label="Close area information" onClick={() => { setAreaInfo(false); canvas.current?.focus({ preventScroll: true }) }}>×</button></header>
         <div className="world-notes">

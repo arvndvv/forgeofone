@@ -54,12 +54,35 @@ function remember<K, V>(cache: Map<K, V>, key: K, value: V, max: number) {
 const PREFIXES = ['Willow', 'Amber', 'Cedar', 'Fern', 'Maple', 'Birch', 'Moss', 'Oak']
 const SUFFIXES = ['brook', 'field', 'haven', 'ridge', 'wick', 'meadow']
 const SHOPS = ['Bakery', 'General Store', 'Coffee House', 'Bookshop', 'Workshop', 'Flower Shop']
-const LANDMARKS: Array<{ col: number; row: number; label: string; screen: string }> = [
+type Landmark = { col: number; row: number; label: string; screen?: string; flavor?: string }
+// The origin town's core landmarks open the app's own screens -- these are
+// part of the game itself, not meant to be edited casually.
+const CORE_LANDMARKS: Landmark[] = [
   { col: 1, row: 1, label: 'Dev Desk', screen: 'work' },
   { col: 2, row: 1, label: 'Your Ventures', screen: 'ventures' },
   { col: 2, row: 2, label: 'The Job Board', screen: 'opportunities' },
   { col: 1, row: 2, label: 'Hall of Records', screen: 'chronicle' },
 ]
+
+/** Extra named/landmark buildings for any town, keyed by region id "rx,ry"
+ *  (Founders Green, the start town, is "0,0"). Add an entry here to give a
+ *  specific town a custom building beyond its procedurally-generated homes
+ *  and shops -- for example a mentor's workshop with its own name and
+ *  flavor text, optionally paired with a PINNED_RESIDENTS entry (in
+ *  residents.ts) so a specific character is always found there.
+ *
+ *  col/row picks the building's slot in that town's 4x4 grid (0-3, 0-3).
+ *  The slot col===3 && row===1 is always the public garden and can't be
+ *  used; for the origin town, also avoid the four CORE_LANDMARKS slots
+ *  above; for any non-origin town in a woodland or highlands biome, row 0
+ *  col 1 and col 2 are skipped too (that biome leaves those two slots
+ *  empty), so pick a different slot there. `screen` is optional -- only
+ *  set it if entering the building should open one of the app's own
+ *  screens; leave it out for a building that's just a named place with
+ *  its own flavor text. */
+export const TOWN_LANDMARKS: Record<string, Landmark[]> = {
+  '1,0': [{ col: 0, row: 0, label: 'Test House', flavor: 'Testing house' }],
+}
 
 export function getSettlement(rx: number, ry: number, seed: number): Settlement {
   const key = `${seed}:${rx},${ry}`
@@ -67,6 +90,7 @@ export function getSettlement(rx: number, ry: number, seed: number): Settlement 
   if (cached) return cached
   const x = rx * REGION_SIZE, y = ry * REGION_SIZE
   const origin = rx === 0 && ry === 0
+  const townKey = `${rx},${ry}`
   const biome = regionBiome(rx, ry, seed)
   const name = origin ? 'Founders Green' : PREFIXES[Math.floor(hashCoord(rx, ry, seed + 11) * PREFIXES.length)] + SUFFIXES[Math.floor(hashCoord(rx, ry, seed + 12) * SUFFIXES.length)]
   const buildings: Building[] = []
@@ -75,7 +99,8 @@ export function getSettlement(rx: number, ry: number, seed: number): Settlement 
       // The north-east block is a public garden, with room to gather.
       if (col === 3 && row === 1) continue
       if (!origin && row === 0 && (col === 1 || col === 2) && (biome === 'woodland' || biome === 'highlands')) continue
-      const landmark = origin ? LANDMARKS.find(l => l.col === col && l.row === row) : undefined
+      const landmark = (origin ? CORE_LANDMARKS.find(l => l.col === col && l.row === row) : undefined)
+        ?? TOWN_LANDMARKS[townKey]?.find(l => l.col === col && l.row === row)
       const roll = hashCoord(x + col, y + row, seed + 27)
       const kind = landmark ? (landmark.screen === 'work' ? 'work' : 'civic') : row === 1 || row === 2 ? 'shop' : 'home'
       const label = landmark?.label ?? (kind === 'home' ? `${1 + row * 4 + col} ${name} Lane` : `${name} ${SHOPS[Math.floor(roll * SHOPS.length)]}`)
@@ -85,7 +110,7 @@ export function getSettlement(rx: number, ry: number, seed: number): Settlement 
         id: `${rx},${ry}:${col},${row}`, x: bx, y: by, width, height: 4,
         door: { x: bx + Math.floor(width / 2), y: by + 4 }, label, kind,
         roof: landmark?.screen === 'work' || landmark?.screen === 'chronicle' ? 0 : Math.floor(roll * 2),
-        poi: landmark ? { key: landmark.screen, label, screen: landmark.screen, flavor: 'Come in and take a look.', reward: 0 } : undefined,
+        poi: landmark ? { key: landmark.screen ?? `landmark:${rx},${ry}:${col},${row}`, label, screen: landmark.screen, flavor: landmark.flavor ?? 'Come in and take a look.', reward: 0 } : undefined,
       })
     }
   }

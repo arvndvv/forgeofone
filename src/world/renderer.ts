@@ -1,7 +1,7 @@
 import atlasUrl from '../assets/game/world/town-atlas.png'
 import farmUrl from '../assets/game/world/farm-atlas.png'
 import { CHUNK_SIZE, getTile, hashCoord, nearbySettlements, type Building, type Point } from './generation'
-import { getResidents, residentPosition, type ResidentPosition } from './residents'
+import { getResidents, residentPosition, type ResidentPosition, type ResidentOverride } from './residents'
 import { BIOMES, biomeAt, grassColor } from './regions'
 import { getAnimals, animalPosition, type AnimalPosition } from './wildlife'
 import { drawPlayer, drawResident } from './characterArt'
@@ -14,11 +14,26 @@ export interface RenderState {
   seed: number; player: Point; playerFacing: Facing; minutes: number; now: number; zoom: number;
   route: Point[]; labels: boolean; selected: string | null; reducedMotion: boolean
   discoveries: Record<string, true>
+  residentOverrides: Record<string, ResidentOverride>
 }
 
 const loadImage = (url: string) => new Promise<HTMLImageElement>((resolve, reject) => {
   const img = new Image(); img.onload = () => resolve(img); img.onerror = () => reject(new Error('Could not load world artwork')); img.src = url
 })
+
+// Custom per-resident sprites (Resident.sprites / a pinned character's own
+// art) are arbitrary, user-supplied images rather than atlas tiles, loaded
+// lazily on first use. A pending or failed load just falls back to the
+// code-drawn character for that frame; the image appears once it resolves.
+const customSprites = new Map<string, HTMLImageElement | 'loading' | 'error'>()
+function customSprite(src: string): HTMLImageElement | null {
+  const cached = customSprites.get(src)
+  if (cached === 'loading' || cached === 'error' || !cached) {
+    if (!cached) { customSprites.set(src, 'loading'); loadImage(src).then(img => customSprites.set(src, img)).catch(() => customSprites.set(src, 'error')) }
+    return null
+  }
+  return cached
+}
 
 export async function createRenderer(canvas: HTMLCanvasElement, minimap: HTMLCanvasElement) {
   const [atlas, farm] = await Promise.all([atlasUrl, farmUrl].map(loadImage))
@@ -229,13 +244,22 @@ export async function createRenderer(canvas: HTMLCanvasElement, minimap: HTMLCan
       // Travellers can be a full region away from home; stream their owning
       // settlements too so crossing a boundary doesn't make them disappear.
       const residentTowns = nearbySettlements(camera.x, camera.y, state.seed, Math.max(width, height) / scale / 2 + 72)
-      visibleResidents = residentTowns.flatMap(t => getResidents(t, state.seed)).map(r => residentPosition(r, state.minutes)).filter(p => p.visible && p.x >= left && p.x <= right && p.y >= top && p.y <= bottom)
+      visibleResidents = residentTowns.flatMap(t => getResidents(t, state.seed)).map(r => residentPosition(r, state.minutes, state.residentOverrides[r.id])).filter(p => p.visible && p.x >= left && p.x <= right && p.y >= top && p.y <= bottom)
       visibleAnimals = towns.flatMap(t => getAnimals(t, state.seed)).map(a => animalPosition(a, state.minutes)).filter(p => p.x >= left && p.x <= right && p.y >= top && p.y <= bottom)
       for (const p of visibleAnimals) drawables.push({ depth: p.y + 0.81, draw: () => animal(p, state.reducedMotion ? 0 : state.minutes) })
       for (const p of visibleResidents) drawables.push({ depth: p.y + 0.85, draw: () => {
         ctx.fillStyle = '#24423733'; ctx.beginPath(); ctx.ellipse(p.x + 0.5, p.y + 0.86, 0.27, 0.1, 0, 0, Math.PI * 2); ctx.fill()
-        drawResident(ctx, p.x, p.y, p.facing, state.minutes * 2400 + p.resident.sprite * 400, p.moving && !state.reducedMotion, p.resident.sprite)
-        activity(p, state.reducedMotion ? 0 : state.minutes)
+        // A defined resident can supply their own art per state (see
+        // Resident.sprites); otherwise this is the normal code-drawn look.
+        const customUrl = p.resident.sprites?.[p.action] ?? p.resident.sprites?.default
+        const custom = customUrl ? customSprite(customUrl) : null
+        if (custom) {
+          const h = 1.55, w = h * (custom.naturalWidth / custom.naturalHeight)
+          ctx.drawImage(custom, p.x + 0.5 - w / 2, p.y + 0.92 - h, w, h)
+        } else {
+          drawResident(ctx, p.x, p.y, p.facing, state.minutes * 2400 + p.resident.sprite * 400, p.moving && !state.reducedMotion, p.resident.sprite)
+          activity(p, state.reducedMotion ? 0 : state.minutes)
+        }
         if (state.selected === p.resident.id) label(p.resident.name, p.x + 0.5, p.y - 0.65, true)
       } })
       drawables.push({ depth: avatar.y + 0.85, draw: () => {
