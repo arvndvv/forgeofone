@@ -1,8 +1,14 @@
 import type { ResidentPosition, Resident, Activity, SceneKind } from './residents'
 
 export const TALK_TOPICS = ['What are you doing?', 'Tell me about yourself', 'Any work advice?', 'What is nearby?']
-export function residentReply(person: ResidentPosition, question: string, metBefore: boolean) {
+export function residentReply(person: ResidentPosition, question: string, metBefore: boolean, groggy = false) {
   const q = question.toLowerCase(), r = person.resident
+  // Defensive gate, not the main path -- ResidentChat.tsx already blocks
+  // opening a real conversation while person.action === 'sleeping' with
+  // its own "wake them anyway" screen. This only fires if the ambient
+  // scheduler puts them back to sleep mid-conversation, or before the
+  // player has chosen to wake them (groggy = false in that case too).
+  if (person.action === 'sleeping' && !groggy) return `${r.name} is fast asleep and barely stirs. Better come back when they're awake.`
   if (/doing|working|busy|activity/.test(q)) return `${person.moving ? 'I’m on the move. My next stop: ' + person.activity.replace(/^On my way · /, '') : 'Right now I’m ' + person.activity.charAt(0).toLowerCase() + person.activity.slice(1)}. I’m a ${r.role.toLowerCase()} from ${r.town}. ${person.action === 'gardening' ? 'The plants need regular attention, just like a business.' : 'There’s always another little job to finish, but I can spare a moment.'}`
   if (/yourself|name|who|meet/.test(q)) return `${metBefore ? 'Good to see you again! ' : 'Nice to meet you! '}I’m ${r.name}, a ${r.role.toLowerCase()} from ${r.town}. I’m interested in ${r.interest}.${r.backstory ? ' ' + r.backstory : ''} What brought you to town?`
   if (/work|advice|job|business|learn|money/.test(q)) {
@@ -13,10 +19,11 @@ export function residentReply(person: ResidentPosition, question: string, metBef
   if (/hello|hi\b|hey|thanks/.test(q)) return `${metBefore ? 'Hello again' : 'Hello'}, neighbour! I’m ${r.name}. ${person.moving ? 'I have a few errands to run.' : person.activity + '.'} Ask me about my work or places around here.`
   return `I’m better at talking about ${r.interest}. You can ask what I’m doing, about my work, or about places nearby. For a more open-ended conversation, enable a local model in Mira’s settings.`
 }
-export function residentPrompt(person: ResidentPosition) {
+export function residentPrompt(person: ResidentPosition, groggy = false) {
   const r = person.resident
   const backstory = r.backstory ? ` Background: ${r.backstory}` : ''
-  return `You are ${r.name}, a friendly ${r.role} in the offline life-simulation game Forge of One. You live in ${r.town}, work around ${r.workplace}, and like ${r.interest}.${backstory} Your current activity is: ${person.activity}. Respond in first person in 1-3 short sentences. Keep the career and community setting grounded. The main Job Board is in Founders Green. Local ruins are west of town; a camp and community harvest are south. Do not invent rewards, quests, transactions, or claim to change game state. This is conversation only. Stay in character; never claim to be a real person.`
+  const groggyNote = groggy ? ' The player just woke you up from sleeping -- you are groggy and a little annoyed about it, so keep replies noticeably shorter and a bit curt for this whole conversation, though not rude.' : ''
+  return `You are ${r.name}, a friendly ${r.role} in the offline life-simulation game Forge of One. You live in ${r.town}, work around ${r.workplace}, and like ${r.interest}.${backstory}${groggyNote} Your current activity is: ${person.activity}. Respond in first person in 1-3 short sentences. Keep the career and community setting grounded. The main Job Board is in Founders Green. Local ruins are west of town; a camp and community harvest are south. Do not invent rewards, quests, transactions, or claim to change game state. This is conversation only. Stay in character; never claim to be a real person.`
 }
 
 /** Structured result of a player-driven resident decision (see

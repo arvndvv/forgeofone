@@ -19,20 +19,33 @@ function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout: T): Promise<
 export function ResidentChat({ person, onClose, onEnter }: { person: ResidentPosition; onClose: () => void; onEnter?: (position: ResidentPosition) => void }) {
   const [messages, setMessages] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([])
   const [draft, setDraft] = useState(''), [busy, setBusy] = useState(false), [notice, setNotice] = useState('')
+  // Asleep residents don't get a real conversation until their own
+  // schedule wakes them -- unless the player explicitly wakes them, which
+  // has a small, contained consequence: shorter, curter replies for the
+  // rest of THIS conversation (residentPrompt's groggy flag below), not a
+  // lasting penalty. `woke` starts true for anyone who isn't asleep right
+  // now, so it never gates a normal conversation.
+  const [woke, setWoke] = useState(person.action !== 'sleeping')
   const alreadyMet = useRef(!!useGameStore.getState().contacts[person.resident.id]), registered = useRef(false), serial = useRef(0)
   const mode = useLocalAI(s => s.mode), end = useRef<HTMLDivElement>(null)
+  const asleep = person.action === 'sleeping' && !woke
   useEffect(() => {
+    if (asleep) return
     if (!registered.current) { registered.current = true; const r = person.resident; useGameStore.getState().meetResident(r.id, r.name, r.role) }
-    setMessages([{ role: 'assistant', content: residentReply(person, 'hello', alreadyMet.current) }])
+    const greeting = person.action === 'sleeping'
+      ? `(yawns, rubbing their eyes) Mmph... what is it? I was asleep.`
+      : residentReply(person, 'hello', alreadyMet.current)
+    setMessages([{ role: 'assistant', content: greeting }])
     return () => { serial.current++ }
-  }, [])
+  }, [asleep])
   useEffect(() => { end.current?.scrollIntoView({ block: 'nearest' }) }, [messages, busy])
+  const groggy = person.action === 'sleeping' && woke
   const send = async (text: string) => {
     if (!text.trim() || busy) return
     const next = [...messages, { role: 'user' as const, content: text.trim().slice(0, 1000) }].slice(-16), request = ++serial.current
     setMessages(next); setDraft(''); setBusy(true); setNotice('')
-    const fallback = residentReply(person, text, alreadyMet.current)
-    const reply = await withTimeout(conversationReply(residentPrompt(person), next, fallback), 20000, { text: fallback, notice: 'That took too long. Showing an offline reply.' })
+    const fallback = (groggy ? '(still half-asleep) ' : '') + residentReply(person, text, alreadyMet.current, groggy)
+    const reply = await withTimeout(conversationReply(residentPrompt(person, groggy), next, fallback), 20000, { text: fallback, notice: 'That took too long. Showing an offline reply.' })
     if (request !== serial.current) return
     setMessages([...next, { role: 'assistant', content: reply.text }]); setNotice(reply.notice); setBusy(false)
   }
@@ -53,6 +66,18 @@ export function ResidentChat({ person, onClose, onEnter }: { person: ResidentPos
     if (ask === 'enter' && decision.granted && onEnter) {
       onEnter({ ...person, action: decision.action ?? 'resting', activity: decision.activity ?? 'Indoors', scene: decision.scene, description: decision.description, x: person.resident.home.x, y: person.resident.home.y, visible: false })
     }
+  }
+  if (asleep) {
+    return <aside className="resident-chat" role="dialog" aria-label={`${person.resident.name} is asleep`} onKeyDown={e => { if (e.key === 'Escape') onClose() }}>
+      <div className="resident-portrait-wrap"><ResidentPortrait resident={person.resident} /></div>
+      <header><div><h2>{person.resident.name} <span>· {person.resident.role}</span></h2><p>Asleep <span className="activity-tag">sleeping</span></p></div><button aria-label="Close conversation" onClick={onClose}>×</button></header>
+      <div className="resident-messages" aria-live="polite"><p className="assistant">{person.description ?? `${person.resident.name} is fast asleep.`} They won't really wake up and talk right now -- best to come back later, unless you want to disturb them.</p></div>
+      <div className="conversation-topics">
+        <button onClick={onClose}>Leave them be</button>
+        <button onClick={() => setWoke(true)}>Wake them anyway</button>
+      </div>
+      <footer>Waking someone up gets you a conversation, but a grumpier, shorter one.</footer>
+    </aside>
   }
   return <aside className="resident-chat" role="dialog" aria-label={`Talk to ${person.resident.name}`} onKeyDown={e => { if (e.key === 'Escape') onClose() }}>
     <div className="resident-portrait-wrap"><ResidentPortrait resident={person.resident} /></div>

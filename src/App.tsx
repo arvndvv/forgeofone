@@ -1,5 +1,16 @@
-import { useState, type CSSProperties, type ReactNode } from 'react'
-import { useGameStore, formatInr, BUSINESS_STARTUP_COST } from './store/gameStore'
+import { useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import {
+  useGameStore, formatInr,
+  OFFICE_RENT_STARTUP_COST, OFFICE_MONTHLY_RENT, LAND_BUILD_COST, BUILD_DAYS, MAX_EMPLOYEES_PER_BUSINESS,
+  FOOD_CHEAP_COST, FOOD_CHEAP_RELIEF, FOOD_QUALITY_COST, FOOD_QUALITY_RELIEF, CRAVING_HEALTH_PENALTY_START,
+  SAVINGS_DAILY_RATE, LOAN_INTEREST, LOAN_TERM_DAYS,
+  technicalBonus, peopleBonus, resilienceFactor,
+  listSaveSlots,
+} from './store/gameStore'
+import { listWorldTowns } from './world/generation'
+import { FOOD_CATALOG } from './world/shopping'
+import type { Challenge } from './types/game'
+import { useLocalAI } from './services/localAI'
 import { MiraWidget } from './components/MiraWidget'
 import { PlayerPortrait } from './components/PlayerPortrait'
 import { WorldView } from './components/WorldView'
@@ -8,7 +19,7 @@ import iconCoin from './assets/game/ui/icon-coin.png'
 import iconChest from './assets/game/ui/icon-chest.png'
 import iconSignpost from './assets/game/ui/icon-signpost.png'
 import iconHouse from './assets/game/ui/icon-house.png'
-type Screen = 'landing' | 'login' | 'story' | 'home' | 'work' | 'ventures' | 'opportunities' | 'chronicle'
+type Screen = 'landing' | 'login' | 'story' | 'home' | 'work' | 'ventures' | 'opportunities' | 'chronicle' | 'life' | 'bank' | 'dev'
 
 // --- Reusable "carved wood & parchment" panel/button look. Solid colors only
 // (no border-image) so it renders reliably and stays readable everywhere. ---
@@ -306,6 +317,8 @@ function Hud({ screen, onNavigate, onExit }: { screen: Screen; onNavigate: (s: S
           <span style={{ color: state.money < 0 ? '#f28b82' : '#e8c468' }}>{formatInr(state.money)}</span>
         </div>
         <span style={{ color: state.health < 40 ? '#f28b82' : '#8fd19e' }}>Health {state.health.toFixed(0)}%</span>
+        <span style={{ color: state.craving >= CRAVING_HEALTH_PENALTY_START ? '#f28b82' : '#9c9686' }}>Hunger {state.craving.toFixed(0)}%</span>
+        <span style={{ color: state.focus < 40 ? '#f28b82' : '#9c9686' }}>Focus {state.focus.toFixed(0)}%</span>
         <span style={{ color: '#9c9686' }}>Efficiency {(state.efficiency() * 100).toFixed(0)}%</span>
       </div>
 
@@ -336,7 +349,9 @@ const TAB_DEFS: Array<{ id: Screen; label: string }> = [
   { id: 'work', label: 'Dev Desk' },
   { id: 'ventures', label: 'Ventures' },
   { id: 'opportunities', label: 'Job Board' },
+  { id: 'life', label: 'Life & Home' },
   { id: 'chronicle', label: 'Records' },
+  { id: 'dev', label: 'Dev Tools' },
 ]
 
 function TabBar({ screen, onNavigate }: { screen: Screen; onNavigate: (s: Screen) => void }) {
@@ -389,7 +404,7 @@ function WorkScreen() {
         <div className="space-y-1.5">
           {state.activeGigs.map((g) => (
             <div key={g.id} className="rounded px-3 py-2 text-sm" style={{ backgroundColor: 'var(--parchment-dark)', color: 'var(--ink)' }}>
-              {g.title} &middot; {g.daysRemaining} day(s) left &middot; {formatInr(g.payout)} on completion
+              {g.title}{g.employer ? ` -- for ${g.employer}` : ''} &middot; {g.daysRemaining} day(s) left &middot; {formatInr(g.payout)} on completion
             </div>
           ))}
         </div>
@@ -401,31 +416,139 @@ function WorkScreen() {
 // --- Screen 6: Ventures --------------------------------------------------------
 function VenturesScreen() {
   const state = useGameStore()
+  const seed = useGameStore((s) => s.worldSeed)
   const [bizName, setBizName] = useState('')
+  const [premises, setPremises] = useState<'rented' | 'owned'>('rented')
+  const towns = listWorldTowns(seed)
+  const [location, setLocation] = useState(towns[0]?.name ?? '')
+  const cost = premises === 'rented' ? OFFICE_RENT_STARTUP_COST : LAND_BUILD_COST
+  const canAfford = state.money >= cost
+
   return (
     <div className="mx-auto max-w-3xl px-4 py-6">
       <div className="mb-2 flex items-center gap-2">
         <img src={iconChest} alt="" className="h-6 w-6" style={{ imageRendering: 'pixelated' }} />
         <h1 className="font-title text-sm" style={{ color: '#f2e8d0' }}>Your Ventures</h1>
       </div>
-      <p className="mb-4 text-sm" style={{ color: '#9c9686' }}>Businesses you've founded. No limit on how many -- just on how much attention you have.</p>
+      <p className="mb-4 text-sm" style={{ color: '#9c9686' }}>Businesses you've founded, spread across the world. No limit on how many -- just on how much attention you have.</p>
 
       <Panel className="mb-4 px-5 py-4">
         <p className="mb-2 font-semibold" style={{ color: 'var(--ink)' }}>Founded so far ({state.businesses.length})</p>
         {state.businesses.length === 0 && <p className="text-sm" style={{ color: 'var(--ink-soft)' }}>None yet.</p>}
         <div className="space-y-1.5">
-          {state.businesses.map((b) => (
-            <div key={b.id} className="flex items-center gap-2 rounded px-3 py-2 text-sm" style={{ backgroundColor: 'var(--parchment-dark)', color: 'var(--ink)' }}>
-              <img src={iconHouse} alt="" className="h-5 w-5" style={{ imageRendering: 'pixelated' }} />
-              {b.name} &middot; founded day {b.foundedOnDay}
-            </div>
-          ))}
+          {state.businesses.map((b) => {
+            const building = b.premises === 'owned' && (b.buildDaysRemaining ?? 0) > 0
+            const employees = b.employees ?? []
+            const applicants = b.applicants ?? []
+            return (
+              <div key={b.id} className="rounded px-3 py-2 text-sm" style={{ backgroundColor: 'var(--parchment-dark)', color: 'var(--ink)' }}>
+                <div className="flex items-center gap-2">
+                  <img src={iconHouse} alt="" className="h-5 w-5" style={{ imageRendering: 'pixelated' }} />
+                  <span>
+                    {b.name} &middot; {b.location} &middot; founded day {b.foundedOnDay}
+                    {b.premises === 'owned'
+                      ? building
+                        ? <span style={{ color: '#c9a24a' }}> &middot; building, {b.buildDaysRemaining} day{b.buildDaysRemaining === 1 ? '' : 's'} left</span>
+                        : <span style={{ color: '#6b7d5a' }}> &middot; owned outright</span>
+                      : <span style={{ color: '#9c9686' }}> &middot; renting, {formatInr(OFFICE_MONTHLY_RENT)}/mo</span>}
+                  </span>
+                </div>
+
+                {employees.length > 0 && (
+                  <div className="mt-2 space-y-1 pl-7">
+                    {employees.map((e) => (
+                      <div key={e.id} className="flex items-center justify-between gap-2 text-xs" style={{ color: 'var(--ink-soft)' }}>
+                        <span>{e.name} &middot; {e.role} &middot; {formatInr(e.dailyWage)}/day, +{formatInr(e.dailyRevenueBonus)}/day revenue &middot; {e.workMode === 'onsite' ? `onsite at ${b.name}` : 'remote'}</span>
+                        <GameButton tone="quiet" onClick={() => state.fireEmployee(b.id, e.id)} className="px-2 py-1 text-[11px]">
+                          Let go
+                        </GameButton>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {applicants.length > 0 && (
+                  <div className="mt-2 space-y-1 pl-7">
+                    <p className="text-[11px] uppercase tracking-wide" style={{ color: 'var(--ink-soft)' }}>Interested</p>
+                    {applicants.map((a) => (
+                      <div key={a.id} className="flex items-center justify-between gap-2 text-xs" style={{ color: 'var(--ink-soft)' }}>
+                        <span>{a.name} &middot; {a.role} &middot; interested in {a.interest}</span>
+                        <div className="flex gap-1">
+                          <GameButton onClick={() => state.hireApplicant(b.id, a.id, 'onsite')} className="px-2 py-1 text-[11px]">Hire onsite</GameButton>
+                          <GameButton onClick={() => state.hireApplicant(b.id, a.id, 'remote')} className="px-2 py-1 text-[11px]">Hire remote</GameButton>
+                          <GameButton tone="quiet" onClick={() => state.declineApplicant(b.id, a.id)} className="px-2 py-1 text-[11px]">Pass</GameButton>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="mt-2 pl-7">
+                  <GameButton
+                    tone="quiet"
+                    disabled={employees.length >= MAX_EMPLOYEES_PER_BUSINESS}
+                    onClick={() => state.postOpening(b.id)}
+                    className="px-2 py-1 text-[11px]"
+                  >
+                    {employees.length >= MAX_EMPLOYEES_PER_BUSINESS ? 'Staff full' : applicants.length > 0 ? 'Post again' : 'Post an opening'}
+                  </GameButton>
+                </div>
+              </div>
+            )
+          })}
         </div>
       </Panel>
 
       <Panel className="px-5 py-4">
         <p className="mb-2 font-semibold" style={{ color: 'var(--ink)' }}>Found a new one</p>
-        <p className="mb-2 text-xs" style={{ color: 'var(--ink-soft)' }}>Costs {formatInr(BUSINESS_STARTUP_COST)} to start.</p>
+
+        <p className="mb-1.5 text-xs uppercase tracking-wide" style={{ color: 'var(--ink-soft)' }}>Premises</p>
+        <div className="mb-3 grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={() => setPremises('rented')}
+            className="rounded-sm px-3 py-2.5 text-left text-sm"
+            style={{
+              backgroundColor: premises === 'rented' ? 'var(--wood-light)' : 'var(--parchment-dark)',
+              border: `2px solid ${premises === 'rented' ? 'var(--wood-dark)' : 'var(--wood)'}`,
+              color: 'var(--ink)',
+            }}
+          >
+            <span className="font-semibold">Rent an office</span>
+            <br />
+            <span className="text-xs" style={{ color: 'var(--ink-soft)' }}>{formatInr(OFFICE_RENT_STARTUP_COST)} upfront, {formatInr(OFFICE_MONTHLY_RENT)}/mo after &middot; open immediately</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setPremises('owned')}
+            className="rounded-sm px-3 py-2.5 text-left text-sm"
+            style={{
+              backgroundColor: premises === 'owned' ? 'var(--wood-light)' : 'var(--parchment-dark)',
+              border: `2px solid ${premises === 'owned' ? 'var(--wood-dark)' : 'var(--wood)'}`,
+              color: 'var(--ink)',
+            }}
+          >
+            <span className="font-semibold">Buy land &amp; build</span>
+            <br />
+            <span className="text-xs" style={{ color: 'var(--ink-soft)' }}>{formatInr(LAND_BUILD_COST)} upfront, no rent &middot; {BUILD_DAYS} days to build</span>
+          </button>
+        </div>
+
+        <p className="mb-1.5 text-xs uppercase tracking-wide" style={{ color: 'var(--ink-soft)' }}>Location</p>
+        <select
+          className="mb-3 w-full rounded-sm px-3 py-2 text-sm outline-none"
+          style={inputStyle}
+          value={location}
+          onChange={(e) => setLocation(e.target.value)}
+        >
+          {towns.map((t) => (
+            <option key={t.id} value={t.name}>{t.name}{t.id === '0,0' ? ' (home town)' : ''}</option>
+          ))}
+        </select>
+
+        <p className="mb-2 text-xs" style={{ color: canAfford ? 'var(--ink-soft)' : '#a5453b' }}>
+          {canAfford ? `Costs ${formatInr(cost)}.` : `Costs ${formatInr(cost)} -- you have ${formatInr(state.money)}.`}
+        </p>
         <div className="flex gap-2">
           <input
             className="flex-1 rounded-sm px-3 py-2 text-sm outline-none"
@@ -435,9 +558,9 @@ function VenturesScreen() {
             onChange={(e) => setBizName(e.target.value)}
           />
           <GameButton
-            disabled={!bizName.trim()}
+            disabled={!bizName.trim() || !location || !canAfford}
             onClick={() => {
-              state.startBusiness(bizName.trim())
+              state.startBusiness(bizName.trim(), premises, location)
               setBizName('')
             }}
             className="px-4 py-2.5 shrink-0"
@@ -470,7 +593,14 @@ function OpportunitiesScreen() {
       <div className="space-y-3">
         {state.opportunities.map((o) => (
           <Panel key={o.id} className="px-5 py-4">
-            <p className="font-semibold" style={{ color: 'var(--ink)' }}>{o.title}</p>
+            <p className="font-semibold" style={{ color: 'var(--ink)' }}>{o.title}{o.aiGenerated && <span className="ml-2 rounded-sm px-1.5 py-0.5 text-[8px] uppercase tracking-wide" style={{ backgroundColor: 'var(--parchment-dark)', color: '#6b7d5a' }}>AI</span>}</p>
+            {o.kind === 'job' && o.employer && (
+              <p className="text-xs" style={{ color: 'var(--ink-soft)' }}>Hiring: {o.employer}, {o.location}{o.contact ? ` -- reports to ${o.contact}` : ''}</p>
+            )}
+            {o.kind === 'freelance' && o.employer && (
+              <p className="text-xs" style={{ color: 'var(--ink-soft)' }}>Client: {o.employer}, {o.location}</p>
+            )}
+            {o.kind === 'business' && o.location && <p className="text-xs" style={{ color: 'var(--ink-soft)' }}>Based in {o.location}</p>}
             {o.payout > 0 && <p className="text-sm" style={{ color: 'var(--ink-soft)' }}>Payout: {formatInr(o.payout)}</p>}
             <div className="mt-3 flex gap-2">
               <GameButton onClick={() => state.acceptOpportunity(o.id)} className="px-3 py-2">
@@ -487,12 +617,423 @@ function OpportunitiesScreen() {
   )
 }
 
+// --- Screen: Life & Home -- hunger/food, the pantry, the library, and focus.
+// The bank itself moved to a separate, physical-only BankScreen (below) --
+// per the locked design, cash-in-hand and stored personal items stay
+// reachable from home/tab, but the bank teller service is walk-in only. ---
+function LifeScreen() {
+  const state = useGameStore()
+
+  return (
+    <div className="mx-auto max-w-3xl px-4 py-6">
+      <h1 className="font-title mb-2 text-sm" style={{ color: '#f2e8d0' }}>Life &amp; Home</h1>
+      <p className="mb-4 text-sm" style={{ color: '#9c9686' }}>The everyday upkeep behind the career and the businesses. Banking is done in person, at The Bank in town.</p>
+
+      <Panel className="mb-4 px-5 py-4">
+        <p className="mb-1 font-semibold" style={{ color: 'var(--ink)' }}>Hunger -- {state.craving.toFixed(0)}%</p>
+        <p className="mb-3 text-xs" style={{ color: 'var(--ink-soft)' }}>Climbs a little every day. Past {CRAVING_HEALTH_PENALTY_START}% it starts costing health on its own.</p>
+        <div className="flex gap-2">
+          <GameButton tone="quiet" onClick={() => state.eat('cheap')} disabled={state.money < FOOD_CHEAP_COST} className="flex-1 px-3 py-2.5 text-left">
+            Quick, cheap bite<br /><span className="text-[9px]" style={{ color: '#8a8474' }}>{formatInr(FOOD_CHEAP_COST)} &middot; -{FOOD_CHEAP_RELIEF} hunger</span>
+          </GameButton>
+          <GameButton onClick={() => state.eat('quality')} disabled={state.money < FOOD_QUALITY_COST} className="flex-1 px-3 py-2.5 text-left">
+            Proper meal<br /><span className="text-[9px]" style={{ color: '#f7ecd3' }}>{formatInr(FOOD_QUALITY_COST)} &middot; -{FOOD_QUALITY_RELIEF} hunger, +health</span>
+          </GameButton>
+        </div>
+      </Panel>
+
+      {state.inventory.some(i => i.category === 'food') && (
+        <Panel className="mb-4 px-5 py-4">
+          <p className="mb-1 font-semibold" style={{ color: 'var(--ink)' }}>Pantry</p>
+          <p className="mb-3 text-xs" style={{ color: 'var(--ink-soft)' }}>Food bought at a shop and brought home -- eat it any time, no extra cost.</p>
+          <div className="flex flex-col gap-2">
+            {state.inventory.filter(i => i.category === 'food').map(i => {
+              const food = FOOD_CATALOG.find(f => f.id === i.id)
+              return (
+                <div key={i.id} className="flex items-center justify-between gap-2 rounded-sm px-3 py-2" style={{ backgroundColor: 'var(--parchment-dark)' }}>
+                  <span className="text-sm" style={{ color: 'var(--ink)' }}>{i.name} <span className="text-xs" style={{ color: 'var(--ink-soft)' }}>&times;{i.quantity}</span></span>
+                  <GameButton tone="quiet" onClick={() => state.eatStored(i.id)} className="px-3 py-1.5 text-xs">
+                    Eat{food ? ` (-${food.relief} hunger${food.healthBonus ? ', +health' : ''})` : ''}
+                  </GameButton>
+                </div>
+              )
+            })}
+          </div>
+        </Panel>
+      )}
+
+      <Panel className="mb-4 px-5 py-4">
+        <p className="mb-1 font-semibold" style={{ color: 'var(--ink)' }}>Library</p>
+        <p className="mb-3 text-xs" style={{ color: 'var(--ink-soft)' }}>Books bought from the bookshop. Reading one jots down a quote or note below its title.</p>
+        {state.library.length === 0 && <p className="text-xs" style={{ color: 'var(--ink-soft)' }}>Nothing on the shelf yet -- visit a Bookshop in town.</p>}
+        <div className="flex flex-col gap-2">
+          {state.library.map(book => (
+            <div key={book.id} className="rounded-sm px-3 py-2" style={{ backgroundColor: 'var(--parchment-dark)' }}>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-sm" style={{ color: 'var(--ink)' }}>{book.title}</span>
+                <GameButton tone="quiet" disabled={state._readingBookId === book.id} onClick={() => state.readBook(book.id)} className="px-3 py-1.5 text-xs">
+                  {state._readingBookId === book.id ? 'Reading…' : 'Read'}
+                </GameButton>
+              </div>
+              {book.notes.map((note, i) => (
+                <p key={i} className="mt-1 text-xs italic" style={{ color: 'var(--ink-soft)' }}>&ldquo;{note}&rdquo;</p>
+              ))}
+            </div>
+          ))}
+        </div>
+      </Panel>
+
+      <Panel className="px-5 py-4">
+        <p className="mb-1 font-semibold" style={{ color: 'var(--ink)' }}>Focus -- {state.focus.toFixed(0)}%</p>
+        <p className="text-xs" style={{ color: 'var(--ink-soft)' }}>Every active commitment (job, gigs, businesses) drains a bit of this each day. It recovers on its own when you ease off, and low focus scales your earnings down further, on top of juggling too much.</p>
+      </Panel>
+    </div>
+  )
+}
+
+// --- Screen: The Bank -- reached only by walking to its building in the
+// World and pressing E (see world/generation.ts's CORE_LANDMARKS and
+// WorldView.tsx's screen-navigation handling). Unlike every other screen,
+// this one is deliberately NOT in the quick tab bar -- taking or checking a
+// loan is meant to be a physical errand, not a menu reachable from
+// anywhere. Savings interest keeps accruing automatically regardless of
+// whether the player ever visits; only the teller service itself is gated. ---
+function BankScreen() {
+  const state = useGameStore()
+  const [loanAmount, setLoanAmount] = useState('')
+
+  return (
+    <div className="mx-auto max-w-2xl px-4 py-6">
+      <h1 className="font-title mb-2 text-sm" style={{ color: '#f2e8d0' }}>The Bank</h1>
+      <p className="mb-4 text-sm" style={{ color: '#9c9686' }}>You have {formatInr(state.money)} in hand. A positive balance earns {(SAVINGS_DAILY_RATE * 100).toFixed(2)}% interest a day, automatically, whether you visit or not.</p>
+
+      <Panel className="px-5 py-4">
+        <p className="mb-1 font-semibold" style={{ color: 'var(--ink)' }}>Loans</p>
+        {state.bankLoan ? (
+          <div className="rounded px-3 py-2 text-sm" style={{ backgroundColor: 'var(--parchment-dark)', color: 'var(--ink)' }}>
+            Outstanding loan: {formatInr(state.bankLoan.principal)} total &middot; {formatInr(state.bankLoan.dailyPayment)}/day for {state.bankLoan.daysRemaining} more day{state.bankLoan.daysRemaining === 1 ? '' : 's'}.
+          </div>
+        ) : (
+          <>
+            <p className="mb-2 text-xs" style={{ color: 'var(--ink-soft)' }}>Borrow against the future: {(LOAN_INTEREST * 100).toFixed(0)}% interest up front, repaid automatically over {LOAN_TERM_DAYS} days.</p>
+            <div className="flex gap-2">
+              <input
+                className="flex-1 rounded-sm px-3 py-2 text-sm outline-none"
+                style={inputStyle}
+                type="number"
+                min={1}
+                placeholder="Amount to borrow"
+                value={loanAmount}
+                onChange={(e) => setLoanAmount(e.target.value)}
+              />
+              <GameButton
+                disabled={!Number(loanAmount) || Number(loanAmount) <= 0}
+                onClick={() => {
+                  state.takeLoan(Math.round(Number(loanAmount)))
+                  setLoanAmount('')
+                }}
+                className="px-4 py-2.5 shrink-0"
+              >
+                Borrow
+              </GameButton>
+            </div>
+          </>
+        )}
+      </Panel>
+    </div>
+  )
+}
+
+// --- A slim, dismissible nag recommending a connected local model --
+// learning content and the job market are meaningfully better with one,
+// but the game is fully playable without it (this never blocks anything). ---
+function AIConnectBanner() {
+  const ai = useLocalAI()
+  const [dismissed, setDismissed] = useState(() => {
+    try { return localStorage.getItem('forge-ai-banner-dismissed') === '1' } catch { return false }
+  })
+  const ready = ai.mode === 'ollama' && !!ai.model
+  if (ready || dismissed) return null
+  return (
+    <div className="fixed inset-x-0 bottom-0 z-40 flex justify-center px-4 pb-4">
+      <div className="flex w-full max-w-2xl items-center gap-3 rounded-sm px-4 py-3 text-sm" style={{ backgroundColor: '#1f2a1c', border: '2px solid var(--wood)', color: '#e8dfc7' }}>
+        <span className="flex-1">
+          Connect a local AI model (via Mira's settings, the gear icon) for endlessly varied challenges and job postings tailored to how you actually play. Not required -- everything still works without it -- but recommended.
+        </span>
+        <GameButton tone="quiet" onClick={() => useGameStore.getState().openAssistant()} className="px-3 py-2 shrink-0 text-[9px]">
+          Open Mira
+        </GameButton>
+        <button
+          aria-label="Dismiss AI recommendation"
+          className="shrink-0 text-lg leading-none"
+          style={{ color: '#9c9686' }}
+          onClick={() => {
+            setDismissed(true)
+            try { localStorage.setItem('forge-ai-banner-dismissed', '1') } catch { /* still dismisses for this session */ }
+          }}
+        >
+          ×
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// --- A "situation" -- the learning-by-playing challenge modal, shown over
+// whatever screen is up whenever the store has one pending. ---
+// A situation reads as coming from a real place -- work, your own business,
+// or ordinary life -- rather than an unlabeled quiz box.
+const SOURCE_LABEL: Record<Challenge['source'], string> = { dev: 'At work', business: 'At your business', life: 'Everyday life' }
+
+function ChallengeModal() {
+  const challenge = useGameStore((s) => s.pendingChallenge)
+  const resolveChallenge = useGameStore((s) => s.resolveChallenge)
+  const requestJudgment = useGameStore((s) => s.requestJudgment)
+  const judgment = useGameStore((s) => s.judgment)
+  const judgeLoading = useGameStore((s) => s._judgeLoading)
+  const preferFreeText = useGameStore((s) => s.preferFreeTextChallenges)
+  const freeTextOptionIndex = useGameStore((s) => s.freeTextOptionIndex)
+  const freeTextAnswer = useGameStore((s) => s.freeTextAnswer)
+  const gradeFreeTextAnswer = useGameStore((s) => s.gradeFreeTextAnswer)
+  const [pickedIndex, setPickedIndex] = useState<number | null>(null)
+  // Which way this challenge is being answered -- picking from the 3
+  // presets, or typing a free-text answer instead. Defaults from the
+  // player's global setting (Mira's settings panel) but is changeable for
+  // THIS challenge specifically, per the locked design.
+  const [mode, setMode] = useState<'options' | 'freeText'>(preferFreeText ? 'freeText' : 'options')
+  const [draft, setDraft] = useState('')
+  const [submitted, setSubmitted] = useState(false)
+  const lastChallengeId = useRef<string | null>(null)
+  if (challenge && challenge.id !== lastChallengeId.current) {
+    lastChallengeId.current = challenge.id
+    // A fresh challenge arrived -- reset per-challenge UI state so it opens
+    // clean, on the player's current global default.
+    if (mode !== (preferFreeText ? 'freeText' : 'options')) setMode(preferFreeText ? 'freeText' : 'options')
+    if (pickedIndex !== null) setPickedIndex(null)
+    if (draft) setDraft('')
+    if (submitted) setSubmitted(false)
+  }
+
+  if (!challenge) return null
+  const picked = pickedIndex !== null ? challenge.options[pickedIndex] : null
+  const freeTextPicked = freeTextOptionIndex !== null ? challenge.options[freeTextOptionIndex] : null
+  const eyebrow = <p className="mb-1 text-[9px] uppercase tracking-[0.2em]" style={{ color: 'var(--ink-soft)' }}>{SOURCE_LABEL[challenge.source]} · {challenge.domain.replace('-', ' ')}{challenge.difficulty === 'big' && ' · big one'}{challenge.aiGenerated && ' · AI-generated'}</p>
+
+  // Result view, once an answer's actually been resolved-in-principle
+  // (a preset picked, or a free-text answer graded) -- same shape either
+  // way: outcome/lesson (from whichever preset option the answer maps to)
+  // plus Mira's reaction, then "Got it" applies the numbers for real.
+  if (picked || freeTextPicked) {
+    const shown = picked ?? freeTextPicked!
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center px-4" style={{ backgroundColor: 'rgba(6,12,9,0.75)' }} role="dialog" aria-label={challenge.title}>
+        <Panel className="w-full max-w-lg px-7 py-6">
+          {eyebrow}
+          <h2 className="font-title mb-3 text-sm" style={{ color: 'var(--wood-dark)' }}>{challenge.title}</h2>
+          {picked && <p className="mb-3 text-base leading-relaxed" style={{ color: 'var(--ink)' }}>{picked.outcome}</p>}
+          {freeTextPicked && <p className="mb-3 text-base italic leading-relaxed" style={{ color: 'var(--ink-soft)' }}>You wrote: &ldquo;{freeTextAnswer}&rdquo;</p>}
+          <p className="mb-3 rounded-sm px-3 py-2.5 text-base leading-relaxed" style={{ backgroundColor: 'var(--parchment-dark)', color: 'var(--ink)' }}>
+            <span className="font-semibold">Lesson: </span>{shown.lesson}
+          </p>
+          {(judgeLoading || judgment) && (
+            <p className="mb-5 rounded-sm px-3 py-2.5 text-base leading-relaxed" style={{ backgroundColor: 'var(--parchment-dark)', border: '2px solid var(--wood)', color: 'var(--ink)' }}>
+              <span className="font-semibold">Mira: </span>
+              {judgment ?? 'Thinking about your choice...'}
+            </p>
+          )}
+          <GameButton
+            onClick={() => {
+              const index = picked ? pickedIndex! : freeTextOptionIndex!
+              resolveChallenge(index, freeTextPicked ? (freeTextAnswer ?? undefined) : undefined)
+              setPickedIndex(null)
+            }}
+            className="w-full py-2.5"
+          >
+            Got it
+          </GameButton>
+        </Panel>
+      </div>
+    )
+  }
+
+  // Free text submitted but still grading (no result yet) -- a short wait,
+  // same shape as the "Thinking about your choice" state above.
+  if (mode === 'freeText' && submitted) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center px-4" style={{ backgroundColor: 'rgba(6,12,9,0.75)' }} role="dialog" aria-label={challenge.title}>
+        <Panel className="w-full max-w-lg px-7 py-6">
+          {eyebrow}
+          <h2 className="font-title mb-3 text-sm" style={{ color: 'var(--wood-dark)' }}>{challenge.title}</h2>
+          <p className="mb-3 text-base italic leading-relaxed" style={{ color: 'var(--ink-soft)' }}>You wrote: &ldquo;{draft}&rdquo;</p>
+          <p className="text-base leading-relaxed" style={{ color: 'var(--ink)' }}>Weighing your answer...</p>
+        </Panel>
+      </div>
+    )
+  }
+
+  // Not yet answered -- scenario plus either the 3 presets, or a free-text
+  // box, with a small link to switch which one THIS challenge uses.
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center px-4" style={{ backgroundColor: 'rgba(6,12,9,0.75)' }} role="dialog" aria-label={challenge.title}>
+      <Panel className="w-full max-w-lg px-7 py-6">
+        {eyebrow}
+        <h2 className="font-title mb-3 text-sm" style={{ color: 'var(--wood-dark)' }}>{challenge.title}</h2>
+        <p className="mb-5 text-base leading-relaxed" style={{ color: 'var(--ink)' }}>{challenge.scenario}</p>
+        {mode === 'options' ? (
+          <>
+            <div className="space-y-2">
+              {challenge.options.map((o, i) => (
+                <GameButton
+                  key={i}
+                  tone="quiet"
+                  onClick={() => {
+                    setPickedIndex(i)
+                    requestJudgment(challenge, i)
+                  }}
+                  className="w-full px-4 py-2.5 text-left"
+                >
+                  {o.label}
+                </GameButton>
+              ))}
+            </div>
+            <button className="mt-3 text-xs underline" style={{ color: 'var(--ink-soft)' }} onClick={() => setMode('freeText')}>Type your own answer instead</button>
+          </>
+        ) : (
+          <>
+            <textarea
+              className="mb-2 w-full rounded-sm px-3 py-2 text-sm outline-none"
+              style={{ ...inputStyle, minHeight: 90, resize: 'vertical' }}
+              maxLength={600}
+              placeholder="What would you actually do?"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              aria-label="Your own answer"
+            />
+            <div className="flex items-center justify-between gap-3">
+              <button className="text-xs underline" style={{ color: 'var(--ink-soft)' }} onClick={() => setMode('options')}>Switch to multiple choice</button>
+              <GameButton
+                disabled={!draft.trim()}
+                onClick={() => {
+                  setSubmitted(true)
+                  gradeFreeTextAnswer(challenge, draft)
+                }}
+                className="px-4 py-2.5 shrink-0"
+              >
+                Submit
+              </GameButton>
+            </div>
+          </>
+        )}
+      </Panel>
+    </div>
+  )
+}
+
+function DevToolsScreen() {
+  const day = useGameStore((s) => s.day)
+  const money = useGameStore((s) => s.money)
+  const advanceDays = useGameStore((s) => s.advanceDays)
+  const addMoney = useGameStore((s) => s.addMoney)
+  const forceChallenge = useGameStore((s) => s.forceChallenge)
+  const saveToSlot = useGameStore((s) => s.saveToSlot)
+  const loadFromSlot = useGameStore((s) => s.loadFromSlot)
+  const deleteSlot = useGameStore((s) => s.deleteSlot)
+  const [slotName, setSlotName] = useState('checkpoint')
+  const [slots, setSlots] = useState<string[]>(() => listSaveSlots())
+  const refreshSlots = () => setSlots(listSaveSlots())
+
+  return (
+    <div className="mx-auto max-w-2xl px-4 py-6">
+      <h1 className="font-title mb-2 text-sm" style={{ color: '#f2e8d0' }}>Dev Tools</h1>
+      <p className="mb-4 text-sm" style={{ color: '#9c9686' }}>
+        Day {day} &middot; {formatInr(money)}. Not part of the story -- for testing without replaying a whole run from scratch.
+      </p>
+
+      <Panel className="mb-4 px-5 py-4">
+        <p className="mb-2 font-semibold" style={{ color: 'var(--ink)' }}>Fast-forward</p>
+        <p className="mb-3 text-xs" style={{ color: 'var(--ink-soft)' }}>Runs the real day-rollover logic instantly, same as playing it out in real time.</p>
+        <div className="flex flex-wrap gap-2">
+          <GameButton tone="quiet" onClick={() => advanceDays(1)} className="px-3 py-2 text-[9px]">+1 day</GameButton>
+          <GameButton tone="quiet" onClick={() => advanceDays(5)} className="px-3 py-2 text-[9px]">+5 days</GameButton>
+          <GameButton tone="quiet" onClick={() => advanceDays(15)} className="px-3 py-2 text-[9px]">+15 days</GameButton>
+        </div>
+      </Panel>
+
+      <Panel className="mb-4 px-5 py-4">
+        <p className="mb-2 font-semibold" style={{ color: 'var(--ink)' }}>Cheats</p>
+        <div className="flex flex-wrap gap-2">
+          <GameButton tone="quiet" onClick={() => forceChallenge()} className="px-3 py-2 text-[9px]">Force a challenge now</GameButton>
+          <GameButton tone="quiet" onClick={() => addMoney(50000)} className="px-3 py-2 text-[9px]">+ {formatInr(50000)}</GameButton>
+        </div>
+      </Panel>
+
+      <Panel className="px-5 py-4">
+        <p className="mb-2 font-semibold" style={{ color: 'var(--ink)' }}>Snapshots</p>
+        <p className="mb-3 text-xs" style={{ color: 'var(--ink-soft)' }}>Save right before a spot you want to retest, then reload it after every fix instead of starting over. Separate from the automatic save -- these stick around until you delete them.</p>
+        <div className="mb-3 flex gap-2">
+          <input
+            value={slotName}
+            onChange={(e) => setSlotName(e.target.value)}
+            className="flex-1 rounded-sm px-2 py-1.5 text-sm"
+            style={{ backgroundColor: 'var(--parchment-dark)', color: 'var(--ink)', border: '2px solid var(--wood)' }}
+          />
+          <GameButton
+            onClick={() => {
+              saveToSlot(slotName)
+              refreshSlots()
+            }}
+            className="px-3 py-1.5 text-[9px]"
+          >
+            Save
+          </GameButton>
+        </div>
+        <div className="space-y-1.5">
+          {slots.length === 0 && <p className="text-xs" style={{ color: 'var(--ink-soft)' }}>No snapshots yet.</p>}
+          {slots.map((slot) => (
+            <div key={slot} className="flex items-center gap-2 rounded-sm px-2 py-1.5" style={{ backgroundColor: 'var(--parchment-dark)' }}>
+              <span className="flex-1 text-sm" style={{ color: 'var(--ink)' }}>{slot}</span>
+              <GameButton tone="quiet" onClick={() => loadFromSlot(slot)} className="px-2 py-1 text-[9px]">Load</GameButton>
+              <GameButton
+                tone="quiet"
+                onClick={() => {
+                  deleteSlot(slot)
+                  refreshSlots()
+                }}
+                className="px-2 py-1 text-[9px]"
+              >
+                Delete
+              </GameButton>
+            </div>
+          ))}
+        </div>
+      </Panel>
+    </div>
+  )
+}
+
 function ChronicleScreen() {
   const log = useGameStore((s) => s.log)
+  const skills = useGameStore((s) => s.skills)
+  const skillEntries = Object.entries(skills)
   return (
     <div className="mx-auto max-w-3xl px-4 py-6">
       <h1 className="font-title mb-2 text-sm" style={{ color: '#f2e8d0' }}>Hall of Records</h1>
       <p className="mb-4 text-sm" style={{ color: '#9c9686' }}>Everything that's happened so far, most recent first -- your own doings and the town's.</p>
+      {skillEntries.length > 0 && (
+        <Panel className="mb-4 px-5 py-4">
+          <p className="mb-2 font-semibold" style={{ color: 'var(--ink)' }}>What you've learned</p>
+          <div className="mb-3 flex flex-wrap gap-2">
+            {skillEntries.sort((a, b) => b[1] - a[1]).map(([domain, level]) => (
+              <span key={domain} className="rounded-sm px-2.5 py-1 text-xs" style={{ backgroundColor: 'var(--parchment-dark)', color: 'var(--ink)' }}>
+                {domain.replace('-', ' ')} &middot; {level}
+              </span>
+            ))}
+          </div>
+          <p className="text-xs" style={{ color: 'var(--ink-soft)' }}>
+            Feeding back into your numbers right now: +{(technicalBonus(skills) * 100).toFixed(0)}% efficiency from technical skill, +{(peopleBonus(skills) * 100).toFixed(0)}% gig/business income from people skills, sickness odds at {(resilienceFactor(skills) * 100).toFixed(0)}% of normal from resilience, and a better loan rate the more personal-finance you've picked up.
+          </p>
+        </Panel>
+      )}
       <Panel className="px-5 py-4">
         <div className="space-y-1.5 text-sm" style={{ color: 'var(--ink)' }}>
           {log.map((entry) => (
@@ -558,9 +1099,14 @@ export default function App() {
         {screen === 'work' && <WorkScreen />}
         {screen === 'ventures' && <VenturesScreen />}
         {screen === 'opportunities' && <OpportunitiesScreen />}
+        {screen === 'life' && <LifeScreen />}
+        {screen === 'bank' && <BankScreen />}
         {screen === 'chronicle' && <ChronicleScreen />}
+        {screen === 'dev' && <DevToolsScreen />}
       </main>
       <MiraWidget docked={screen === 'home'} />
+      <ChallengeModal />
+      <AIConnectBanner />
     </div>
   )
 }

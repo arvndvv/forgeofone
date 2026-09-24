@@ -61,9 +61,15 @@ export async function ollamaChat(payload: ChatPayload): ReturnType<Bridge['chat'
   if (!installed.ok) return { ok: false, error: installed.error }
   if (!installed.models.some(m => m.name === payload.model)) return { ok: false, error: 'Choose an installed local model in Mira’s settings.' }
   try {
+    const numPredict = Math.min(800, Math.max(60, payload.maxTokens ?? 180))
     const response = await fetch(`${LOCAL_URL}/api/chat`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(45000),
-      body: JSON.stringify({ ...payload, stream: false, ...(/qwen3/i.test(payload.model) ? { think: false } : {}), keep_alive: '2m', options: { num_predict: 180, num_ctx: 4096, temperature: 0.65 } }),
+      body: JSON.stringify({
+        model: payload.model, messages: payload.messages, stream: false,
+        ...(/qwen3/i.test(payload.model) ? { think: false } : {}),
+        ...(payload.json ? { format: 'json' } : {}),
+        keep_alive: '2m', options: { num_predict: numPredict, num_ctx: 4096, temperature: 0.65 },
+      }),
     })
     if (!response.ok) throw Error('The local model could not complete that reply.')
     const data = await response.json(), text = data.message?.content?.trim()

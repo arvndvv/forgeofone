@@ -1,12 +1,8 @@
-import { hashCoord, getSettlement, getTile, type Point, type Settlement } from './generation'
+import { hashCoord, getSettlement, getTile, listWorldTowns, type Point, type Settlement } from './generation'
 import { findPath } from './pathfinding'
 import { facingForStep, type Facing } from './facing'
+import type { Applicant, Employee, SkillDomain } from '../types/game'
 import tamPortrait from '../assets/game/characters/npc-villager4.png'
-import sa_por from '../assets/game/residents/saj/12.png'
-import sa_lie from '../assets/game/residents/sa_lie.webp'
-import sa_def from '../assets/game/residents/sa_def.webp'
-import sa_hor from '../assets/game/residents/sa_hor.webp'
-import sa_spre from '../assets/game/residents/sa_spre.webp'
 export type Activity = 'walking' | 'baking' | 'gardening' | 'selling' | 'repairing' | 'painting' | 'delivery' | 'reading' | 'resting' | 'chatting' | 'sleeping' | 'cooking' | 'playing' | 'home'
 /** Which drawn room a 'home' stop shows in HomeInterior.tsx -- picks the
  *  furniture (bed, table, bookshelf, ...). 'custom' is a plain room with a
@@ -52,6 +48,15 @@ export interface Resident {
    *  at even while that resident is invisible (indoors) and not in the
    *  visible list. */
   homeBuildingId?: string
+  /** Pinned residents only -- which skill-coaching domains (see
+   *  types/game.ts SkillDomain) this specific character is "the expert"
+   *  for. gameStore's refillAIChallenges() looks this up: when it drafts a
+   *  challenge in one of these domains, it names this character in the
+   *  scenario instead of an anonymous coworker, using their role/interest/
+   *  backstory below -- a real "character definition" the AI-generated
+   *  story can build on, not just a random encounter. Optional -- leave
+   *  unset for a resident who's just flavor and never anchors a challenge. */
+  expertise?: SkillDomain[]
   /** Pinned residents only, below -- mirrors of the matching PinnedResident
    *  fields, copied onto the Resident so residentPosition() can compute a
    *  position from (resident, simMinutes, override) alone, with no need to
@@ -97,6 +102,9 @@ export interface PinnedResident {
    *  (see residentPrompt() in conversations.ts) so this character can
    *  roleplay consistently. Optional -- leave blank for no special lore. */
   backstory: string
+  /** Which skill-coaching domains this character is the named expert for
+   *  -- see the matching field on Resident above for how it's used. */
+  expertise?: SkillDomain[]
   /** Which building slot in the town's 4x4 grid they're based at (0-3, 0-3).
    *  Usually a matching TOWN_LANDMARKS entry (generation.ts) so the
    *  building itself has a custom name too, but any generated home or shop
@@ -144,6 +152,7 @@ export const PINNED_RESIDENTS: Record<string, PinnedResident[]> = {
   '1,0': [{
     id: 'elder-tam', name: 'Tam', role: 'Retired shopkeeper', interest: 'old trade routes and giving advice',
     backstory: 'Ran the first general store in Founders Green for thirty years before handing it down.',
+    expertise: ['negotiation', 'personal-finance'],
     col: 0, row: 0, sprite: 9,
     outdoorActivities: [
       { action: 'chatting', label: 'Sitting outside, happy to talk' },
@@ -156,8 +165,95 @@ export const PINNED_RESIDENTS: Record<string, PinnedResident[]> = {
       { action: 'sleeping', scene: 'sleeping', label: 'Asleep', description: 'Tam is fast asleep.' },
     ],
     indoorShare: 0.4, changeMinutes: [90, 240],
-    portrait: sa_por, sprites: { chatting: sa_hor, reading: sa_spre, gardening: sa_hor, resting: sa_spre, sleeping: sa_lie, default: sa_def },
+    portrait: tamPortrait, sprites: { chatting: tamPortrait, reading: tamPortrait, gardening: tamPortrait, resting: tamPortrait, sleeping: tamPortrait, default: tamPortrait },
   }],
+}
+
+/** All pinned residents across every town, flattened -- used by
+ *  expertFor() below. Small and static, so no caching needed. */
+function allPinnedResidents(): PinnedResident[] {
+  return Object.values(PINNED_RESIDENTS).flat()
+}
+
+/** The named pinned resident (if any) tagged as the expert for a given
+ *  skill-coaching domain -- see PinnedResident.expertise. Used by
+ *  gameStore's refillAIChallenges() to name a real character in an
+ *  AI-drafted scenario instead of an anonymous coworker, when one exists
+ *  for that domain. Deterministic pick (first match, in PINNED_RESIDENTS
+ *  declaration order) when more than one resident covers the same domain. */
+export function expertFor(domain: SkillDomain): PinnedResident | undefined {
+  return allPinnedResidents().find(p => p.expertise?.includes(domain))
+}
+
+export interface EmployerInfo {
+  /** Town name -- same string gameStore's Opportunity.location expects. */
+  location: string
+  /** Company name (a real, already-generated non-home building's label)
+   *  for 'job', or a real resident's name for 'freelance'. */
+  employer: string
+  /** The real Building.id this employer is physically based at. */
+  employerBuildingId: string
+  /** The resident the player would actually deal with there -- a manager
+   *  found working at the company, or the client themself for
+   *  'freelance'. Undefined only if no resident happened to match. */
+  contact?: string
+}
+
+/** Picks a real employer for a Job Board posting -- a company for 'job', a
+ *  person for 'freelance' -- so "job openings" are never abstract flavor
+ *  text: they're always anchored to a building and (usually) a resident
+ *  that already exist in the generated world, the same way rival
+ *  businesses and pinned residents are. Called by gameStore before it asks
+ *  the AI to draft a posting's title (so the model can name a real place
+ *  and person instead of staying generic), and by the static pool refill
+ *  the same way. Returns undefined only in the rare case a town has no
+ *  eligible building/resident to offer -- callers should just skip
+ *  spawning that posting rather than falling back to abstract flavor. */
+export function pickEmployer(seed: number, kind: 'job' | 'freelance'): EmployerInfo | undefined {
+  const towns = listWorldTowns(seed)
+  const town = towns[Math.floor(Math.random() * towns.length)]
+  if (kind === 'job') {
+    // A company's premises is any real, non-home building that isn't one
+    // of the player's own app-screen landmarks (Dev Desk, the Job Board
+    // itself, the Bank, Hall of Records, Your Ventures) -- those are the
+    // player's own tools, not somewhere else that's hiring.
+    const companies = town.buildings.filter(b => b.kind !== 'home' && !b.poi?.screen)
+    if (!companies.length) return undefined
+    const building = companies[Math.floor(Math.random() * companies.length)]
+    const manager = getResidents(town, seed).find(r => r.workplace === building.label)
+    return { location: town.name, employer: building.label, employerBuildingId: building.id, contact: manager?.name }
+  }
+  // Freelance: a real resident hiring for a one-off, found at their own home.
+  const residents = getResidents(town, seed).filter(r => !r.id.includes(':traveller:'))
+  if (!residents.length) return undefined
+  const person = residents[Math.floor(Math.random() * residents.length)]
+  const homeBuilding = town.buildings.find(b => b.door.x === person.home.x && b.door.y === person.home.y)
+  if (!homeBuilding) return undefined
+  return { location: town.name, employer: person.name, employerBuildingId: homeBuilding.id, contact: person.name }
+}
+
+/** Real candidates for a player-posted opening at their OWN business (see
+ *  gameStore's postOpening) -- same rule as pickEmployer: never invented
+ *  names, always drawn from residents who already exist in `townName`.
+ *  Pinned residents (they have their own fixed lives/backstories) and
+ *  travellers (passing through, not settling in for a job) are skipped,
+ *  along with anyone already on staff somewhere (`excludeIds`, gathered by
+ *  the caller from every business's current employees). Returns fewer than
+ *  `count` (down to none) if the town doesn't have enough eligible people
+ *  left -- never pads with a made-up name. */
+export function pickApplicants(seed: number, townName: string, excludeIds: Set<string>, count: number): Applicant[] {
+  const town = listWorldTowns(seed).find(t => t.name === townName)
+  if (!town) return []
+  const pool = getResidents(town, seed).filter(r => !r.id.includes(':traveller:') && !r.id.includes(':pinned:') && !excludeIds.has(r.id))
+  const picked: Applicant[] = []
+  const used = new Set<string>()
+  while (picked.length < count && used.size < pool.length) {
+    const candidate = pool[Math.floor(Math.random() * pool.length)]
+    if (used.has(candidate.id)) continue
+    used.add(candidate.id)
+    picked.push({ id: candidate.id, name: candidate.name, role: candidate.role, interest: candidate.interest, sprite: candidate.sprite })
+  }
+  return picked
 }
 
 function openSpot(point: Point, seed: number): Point {
@@ -172,6 +268,47 @@ function strseed(s: string): number {
   for (let i = 0; i < s.length; i++) h = (Math.imul(h, 31) + s.charCodeAt(i)) | 0
   return Math.abs(h)
 }
+
+/** Real, on-the-map presence for the player's own hired staff who work
+ *  onsite (Employee.workMode === 'onsite') -- built fresh from the live
+ *  employees list on every call rather than cached like getResidents()
+ *  (hiring/firing changes it immediately, and the list involved is always
+ *  tiny), then rendered through the exact same residentPosition()/
+ *  pinnedResidentPosition() pipeline as everyone else in world/renderer.ts:
+ *  each hire is shaped as an ordinary single-activity Resident, always
+ *  standing at one fixed, walkable spot near their business's town park
+ *  (placement varies per business+employee via strseed, same trick pinned
+ *  residents use), never wandering -- "hired onsite" reliably means "found
+ *  here." A 'remote' hire gets no entry at all: per the design, they don't
+ *  need to physically show up anywhere. `id` is namespaced
+ *  (`employee:<business id>:<employee id>`) so it can't collide with that
+ *  same person's own procedural resident id -- world/renderer.ts is
+ *  expected to suppress that original id from the visible list while
+ *  they're employed onsite, so the same named person isn't drawn twice. */
+export function employeeResidents(seed: number, businesses: Array<{ id: string; name: string; location: string; employees?: Employee[] }>): Resident[] {
+  const out: Resident[] = []
+  for (const biz of businesses) {
+    const onsite = (biz.employees ?? []).filter((e) => e.workMode === 'onsite')
+    if (!onsite.length) continue
+    const town = listWorldTowns(seed).find((t) => t.name === biz.location)
+    if (!town) continue
+    for (const employee of onsite) {
+      const idSeed = strseed(`${biz.id}:${employee.id}`)
+      const angle = hashCoord(idSeed, 0, seed + 71) * Math.PI * 2
+      const dist = 2 + hashCoord(idSeed, 1, seed + 71) * 3
+      const officeSpot = openSpot({ x: Math.round(town.park.x + Math.cos(angle) * dist), y: Math.round(town.park.y + Math.sin(angle) * dist) }, seed)
+      out.push({
+        id: `employee:${biz.id}:${employee.id}`, name: employee.name, role: employee.role, town: town.name,
+        workplace: biz.name, interest: `working at ${biz.name}`, sprite: employee.sprite,
+        home: officeSpot, post: officeSpot, lane: 0, shift: 0, duration: 1440, stops: [],
+        outdoorActivities: [{ action: 'selling', label: `Working at ${biz.name}` }],
+        bucketMinutes: 1440,
+      })
+    }
+  }
+  return out
+}
+
 const cache = new Map<string, Resident[]>()
 
 export function getResidents(town: Settlement, seed: number): Resident[] {
@@ -236,6 +373,7 @@ export function getResidents(town: Settlement, seed: number): Resident[] {
     residents.push({
       id: `${town.id}:pinned:${pinned.id}`, name: pinned.name, role: pinned.role, town: town.name,
       workplace: building.label, interest: pinned.interest, backstory: pinned.backstory, sprite: pinned.sprite,
+      expertise: pinned.expertise,
       portrait: pinned.portrait, sprites: pinned.sprites, homeBuildingId: building.id,
       post, outdoorActivities: pinned.outdoorActivities, indoorActivities: pinned.indoorActivities,
       indoorShare: pinned.indoorShare, bucketMinutes,

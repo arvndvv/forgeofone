@@ -1,13 +1,13 @@
 import atlasUrl from '../assets/game/world/town-atlas.png'
 import farmUrl from '../assets/game/world/farm-atlas.png'
 import { CHUNK_SIZE, getTile, hashCoord, nearbySettlements, type Building, type Point } from './generation'
-import { getResidents, residentPosition, type ResidentPosition, type ResidentOverride } from './residents'
+import { getResidents, residentPosition, employeeResidents, type ResidentPosition, type ResidentOverride } from './residents'
 import { BIOMES, biomeAt, grassColor } from './regions'
 import { getAnimals, animalPosition, type AnimalPosition } from './wildlife'
 import { drawPlayer, drawResident } from './characterArt'
 import { drawAnimal } from './animalArt'
 import type { Facing } from './facing'
-import type { TileType } from '../types/game'
+import type { TileType, Business } from '../types/game'
 
 export const MAP_COLORS: Record<TileType, string> = { grass: '#83b96b', path: '#d3b080', plaza: '#c0bc98', plot: '#88725a', water: '#5a99ac', sand: '#dec691', bridge: '#ab8056', field: '#a7af57' }
 export interface RenderState {
@@ -15,6 +15,11 @@ export interface RenderState {
   route: Point[]; labels: boolean; selected: string | null; reducedMotion: boolean
   discoveries: Record<string, true>
   residentOverrides: Record<string, ResidentOverride>
+  /** The player's own founded businesses -- used only to place their
+   *  onsite hires physically on the map (see employeeResidents() below).
+   *  Optional so a caller that never sends businesses still renders fine
+   *  with nobody's staff shown. */
+  businesses?: Business[]
 }
 
 const loadImage = (url: string) => new Promise<HTMLImageElement>((resolve, reject) => {
@@ -244,7 +249,16 @@ export async function createRenderer(canvas: HTMLCanvasElement, minimap: HTMLCan
       // Travellers can be a full region away from home; stream their owning
       // settlements too so crossing a boundary doesn't make them disappear.
       const residentTowns = nearbySettlements(camera.x, camera.y, state.seed, Math.max(width, height) / scale / 2 + 72)
-      visibleResidents = residentTowns.flatMap(t => getResidents(t, state.seed)).map(r => residentPosition(r, state.minutes, state.residentOverrides[r.id])).filter(p => p.visible && p.x >= left && p.x <= right && p.y >= top && p.y <= bottom)
+      // A resident hired onsite (see Employee.workMode) gets a second,
+      // synthetic entry standing at their business instead -- suppress
+      // their original procedural entry by id so the same named person
+      // doesn't appear twice at once.
+      const onsiteIds = new Set((state.businesses ?? []).flatMap(b => (b.employees ?? []).filter(e => e.workMode === 'onsite').map(e => e.id)))
+      const hired = employeeResidents(state.seed, state.businesses ?? [])
+      visibleResidents = [
+        ...residentTowns.flatMap(t => getResidents(t, state.seed)).map(r => residentPosition(r, state.minutes, state.residentOverrides[r.id])).filter(p => p.visible && !onsiteIds.has(p.resident.id) && p.x >= left && p.x <= right && p.y >= top && p.y <= bottom),
+        ...hired.map(r => residentPosition(r, state.minutes, state.residentOverrides[r.id])).filter(p => p.visible && p.x >= left && p.x <= right && p.y >= top && p.y <= bottom),
+      ]
       visibleAnimals = towns.flatMap(t => getAnimals(t, state.seed)).map(a => animalPosition(a, state.minutes)).filter(p => p.x >= left && p.x <= right && p.y >= top && p.y <= bottom)
       for (const p of visibleAnimals) drawables.push({ depth: p.y + 0.81, draw: () => animal(p, state.reducedMotion ? 0 : state.minutes) })
       for (const p of visibleResidents) drawables.push({ depth: p.y + 0.85, draw: () => {

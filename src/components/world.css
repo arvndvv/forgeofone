@@ -80,6 +80,21 @@
 .home-interior-canvas { display: block; width: 100%; height: auto; image-rendering: pixelated; }
 .home-interior-note { margin: 0; padding: 12px 20px; font-size: 14px; line-height: 1.5; color: #d7ddba; }
 .home-interior-actions { display: flex; justify-content: flex-end; padding: 0 20px 16px; }
+.shop-interior-canvas { flex: none; }
+.shop-interior-body { padding: 4px 20px 14px; overflow-y: auto; }
+.shop-category-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.shop-category-tabs button { border: 1px solid #7c916c; border-radius: 15px; padding: 4px 11px; color: #d7ddba; font-size: 11px; background: transparent; }
+.shop-category-tabs button[aria-selected="true"] { background: #d4c691; color: #30493d; border-color: #d4c691; }
+.shop-item-list { display: flex; flex-direction: column; gap: 6px; }
+.shop-item-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px; border-radius: 8px; background: #1c301fb0; }
+.shop-item-info strong { display: block; font-size: 14px; font-weight: 400; color: #f2e6bd; }
+.shop-item-info small { display: block; margin-top: 2px; font-size: 11px; color: #a9bb98; }
+.shop-item-buy { display: flex; align-items: center; gap: 8px; flex: none; }
+.shop-item-buy span { font-size: 12px; color: #d7ddba; }
+.shop-item-buy button { background: #d4c691; color: #30493d; padding: 5px 12px; border-radius: 5px; font-size: 12px; }
+.shop-item-buy button:disabled { opacity: .4; }
+.shop-empty { margin: 0; font-size: 13px; color: #a9bb98; }
+.shop-interior-note { border-top: 1px solid #486049; }
 .collection-journal { right: 16px; left: auto; top: 16px; bottom: auto; }.journal-content { padding: 12px 16px 18px; overflow-y: auto; }.journal-content h3 { display: flex; justify-content: space-between; margin: 4px 0 12px; font-size: 16px; font-weight: 400; }.journal-content h3:not(:first-child) { margin-top: 22px; }.journal-content h3 span { font-size: 12px; color: #a4b592; }.journal-content article { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid #425840; }.journal-content article strong { display: block; font-size: 15px; font-weight: 400; }.journal-content article p { margin: 3px 0; color: #b0bea1; font-size: 12px; }.journal-content article small { color: #a5b58f; font-size: 10px; }.item-glyph { color: #e7c981; font-size: 27px; width: 32px; flex: none; text-align: center; }.item-glyph.food { color: #a7c887; }.contact-glyph { display: grid; place-items: center; border-radius: 50%; background: #547252; width: 32px; height: 32px; flex: none; }
 @media (max-width: 700px) {
   .world-screen { padding: 10px 12px 6px; }.world-heading { align-items: flex-start; flex-direction: column; gap: 7px; }.world-heading h1 { font-size: 21px; }.world-eyebrow { font-size: 8px; }.world-toolbar { align-self: flex-end; margin-top: -2px; }

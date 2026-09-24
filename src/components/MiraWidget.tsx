@@ -24,6 +24,14 @@ export function MiraWidget({ docked = false }: { docked?: boolean }) {
         <button onClick={() => ai.configure('offline', ai.model)}>Use offline replies</button>
       </div>
       <p className="mira-connection-status" role="status">{ai.status}</p>
+      <label className="mira-checkbox-label">
+        <input
+          type="checkbox"
+          checked={useGameStore(s => s.preferFreeTextChallenges)}
+          onChange={e => useGameStore.getState().setPreferFreeTextChallenges(e.target.checked)}
+        />
+        Type your own answer to situations by default (changeable each time)
+      </label>
     </div>}
     {notice && <p className="mira-notice" role="status">{notice}</p>}
     <div className="mira-chat" aria-live="polite">{chat.map(m => <div className={`mira-bubble ${m.role === 'player' ? 'player' : ''}`} key={m.id}>{m.text}</div>)}{thinking && <div className="mira-bubble">Thinking about that…</div>}<div ref={end}/></div>

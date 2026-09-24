@@ -20,8 +20,12 @@ body {
   margin: 0;
   background-color: #0d1210;
   color: #e7e2d6;
-  font-family: 'Pixelify Sans', sans-serif;
-  font-size: 17px;
+  /* VT323 -- retro terminal/monospace pixel-game font, swapped in for
+     Pixelify Sans for better legibility at small sizes. It renders a
+     touch smaller per its font-size than most fonts, so the base size
+     is bumped up slightly to compensate. */
+  font-family: 'VT323', monospace;
+  font-size: 19px;
 }
 
 .font-title {
@@ -30,7 +34,8 @@ body {
 }
 
 input {
-  font-family: 'Pixelify Sans', sans-serif;
+  font-family: 'VT323', monospace;
+  font-size: 19px;
 }
 
 .game-shell { height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }

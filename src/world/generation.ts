@@ -1,5 +1,6 @@
 import type { Decor, PointOfInterest, Tile } from '../types/game'
 import { BIOMES, regionBiome, type Biome } from './regions'
+import { FOOD_SHOP_NAMES, BOOK_SHOP_NAME } from './shopping'
 
 export interface Point { x: number; y: number }
 export interface Building extends Point {
@@ -11,6 +12,12 @@ export interface Building extends Point {
   kind: 'home' | 'shop' | 'work' | 'civic'
   roof: number
   poi?: PointOfInterest
+  /** Set on a kind:'shop' building whose flavor name (see SHOPS below) maps
+   *  to a physical, explorable shop -- its doorstep poi gets `shop` set to
+   *  match (see poi assignment below), which is what tells WorldView to open
+   *  a ShopInterior instead of treating it as a decorative building. Workshop
+   *  and Flower Shop are left untagged for now, still purely decorative. */
+  shopType?: 'food' | 'book'
 }
 export interface Settlement extends Point {
   id: string
@@ -62,6 +69,12 @@ const CORE_LANDMARKS: Landmark[] = [
   { col: 2, row: 1, label: 'Your Ventures', screen: 'ventures' },
   { col: 2, row: 2, label: 'The Job Board', screen: 'opportunities' },
   { col: 1, row: 2, label: 'Hall of Records', screen: 'chronicle' },
+  // The bank is deliberately NOT in the quick tab bar (App.tsx's TAB_DEFS) --
+  // per the locked design, banking (taking/viewing a loan) is meant to be
+  // physical-only, unlike every other screen here which is reachable both
+  // by walking AND by tab. Cash-in-hand and savings interest still show
+  // (passively) on Life & Home; only the loan teller service is gated here.
+  { col: 0, row: 1, label: 'The Bank', screen: 'bank' },
 ]
 
 /** Extra named/landmark buildings for any town, keyed by region id "rx,ry"
@@ -103,14 +116,21 @@ export function getSettlement(rx: number, ry: number, seed: number): Settlement 
         ?? TOWN_LANDMARKS[townKey]?.find(l => l.col === col && l.row === row)
       const roll = hashCoord(x + col, y + row, seed + 27)
       const kind = landmark ? (landmark.screen === 'work' ? 'work' : 'civic') : row === 1 || row === 2 ? 'shop' : 'home'
-      const label = landmark?.label ?? (kind === 'home' ? `${1 + row * 4 + col} ${name} Lane` : `${name} ${SHOPS[Math.floor(roll * SHOPS.length)]}`)
+      const shopName = SHOPS[Math.floor(roll * SHOPS.length)]
+      const shopType: 'food' | 'book' | undefined = kind === 'shop' ? (FOOD_SHOP_NAMES.has(shopName) ? 'food' : shopName === BOOK_SHOP_NAME ? 'book' : undefined) : undefined
+      const label = landmark?.label ?? (kind === 'home' ? `${1 + row * 4 + col} ${name} Lane` : `${name} ${shopName}`)
       const width = landmark ? 5 : kind === 'home' ? (roll < 0.5 ? 3 : 4) : (roll < 0.3 ? 4 : 5)
       const bx = x - 17 + col * 10 + (width === 3 ? 1 : 0), by = y - 17 + row * 10
       buildings.push({
         id: `${rx},${ry}:${col},${row}`, x: bx, y: by, width, height: 4,
         door: { x: bx + Math.floor(width / 2), y: by + 4 }, label, kind,
         roof: landmark?.screen === 'work' || landmark?.screen === 'chronicle' ? 0 : Math.floor(roll * 2),
-        poi: landmark ? { key: landmark.screen ?? `landmark:${rx},${ry}:${col},${row}`, label, screen: landmark.screen, flavor: landmark.flavor ?? 'Come in and take a look.', reward: 0 } : undefined,
+        shopType,
+        poi: landmark
+          ? { key: landmark.screen ?? `landmark:${rx},${ry}:${col},${row}`, label, screen: landmark.screen, flavor: landmark.flavor ?? 'Come in and take a look.', reward: 0 }
+          : shopType
+          ? { key: `shop:${rx},${ry}:${col},${row}`, label, flavor: shopType === 'food' ? 'The smell of fresh food drifts out the door.' : 'Shelves of books line the walls, softly lit.', reward: 0, shop: shopType }
+          : undefined,
       })
     }
   }
@@ -148,6 +168,17 @@ export function nearbySettlements(x: number, y: number, seed: number, radius: nu
     for (let rx = Math.floor((x - radius + 32) / 64); rx <= Math.floor((x + radius + 32) / 64); rx++) result.push(getSettlement(rx, ry, seed))
   }
   return result
+}
+
+/** A fixed slate of real, already-generated towns spread across the world --
+ *  the pool the economy simulation (rival businesses, job/business
+ *  postings, and the player's own "found a firm" flow) draws locations
+ *  from, so "multiple companies across the world" means actual named
+ *  towns the player can walk to, not flavor text. A 5x5 block of regions
+ *  centered on the origin town -- 25 towns, always includes Founders
+ *  Green itself. */
+export function listWorldTowns(seed: number): Settlement[] {
+  return nearbySettlements(0, 0, seed, 140)
 }
 
 function tile(type: Tile['type'], decor: Decor = null, walkable = true, poi: PointOfInterest | null = null): Tile {

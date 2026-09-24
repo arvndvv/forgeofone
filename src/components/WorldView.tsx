@@ -10,10 +10,11 @@ import { worldInteraction } from '../world/interactions'
 import { ResidentChat } from './ResidentChat'
 import { CollectionJournal } from './CollectionJournal'
 import { HomeInterior } from './HomeInterior'
+import { ShopInterior } from './ShopInterior'
 import { MiraPet } from './MiraPet'
 import './world.css'
 
-type WorldScreen = 'work' | 'ventures' | 'opportunities' | 'chronicle'
+type WorldScreen = 'work' | 'ventures' | 'opportunities' | 'chronicle' | 'bank'
 type Renderer = Awaited<ReturnType<typeof createRenderer>>
 const DIRECTIONS: Record<string, Point> = {
   ArrowUp: { x: 0, y: -1 }, w: { x: 0, y: -1 }, ArrowDown: { x: 0, y: 1 }, s: { x: 0, y: 1 },
@@ -51,13 +52,14 @@ export function WorldView({ onNavigate }: { onNavigate: (screen: WorldScreen) =>
   const [selected, setSelected] = useState<ResidentPosition | null>(null)
   const [talking, setTalking] = useState<ResidentPosition | null>(null), [journal, setJournal] = useState(false), [animal, setAnimal] = useState<AnimalPosition | null>(null)
   const [home, setHome] = useState<ResidentPosition | null>(null)
+  const [shop, setShop] = useState<{ type: 'food' | 'book'; label: string } | null>(null)
   const overlay = useRef(false), selection = useRef<ResidentPosition | null>(null)
   const homeState = useRef<ResidentPosition | null>(null), talkingState = useRef<ResidentPosition | null>(null)
   // Lets the render effect (mounted once, see below) react immediately when
   // an overlay opens or closes, instead of finding out up to 200ms late.
   const overlayWatcher = useRef<(() => void) | null>(null)
   const wasOverlay = overlay.current
-  overlay.current = !!talking || journal || areaInfo || !!home; selection.current = selected
+  overlay.current = !!talking || journal || areaInfo || !!home || !!shop; selection.current = selected
   homeState.current = home; talkingState.current = talking
   if (wasOverlay !== overlay.current) overlayWatcher.current?.()
   const livePeople = useRef<ResidentPosition[]>([])
@@ -84,6 +86,7 @@ export function WorldView({ onNavigate }: { onNavigate: (screen: WorldScreen) =>
     if (target?.kind === 'place') {
       const inside = residentAtDoor(target.point, s.worldSeed, s.simMinutesTotal, s.residentOverrides)
       if (inside) { setTalking(null); setAreaInfo(false); setHome(inside); return }
+      if (target.poi.shop) { setTalking(null); setAreaInfo(false); setHome(null); setShop({ type: target.poi.shop, label: target.poi.label }); return }
     }
     if (target?.poi.screen) navigate.current(target.poi.screen as WorldScreen)
     else if (target) s.investigateHere()
@@ -130,7 +133,7 @@ export function WorldView({ onNavigate }: { onNavigate: (screen: WorldScreen) =>
           // Smooth between the existing one-second simulation ticks. Clamp when
           // the tab is suspended so the view cannot outrun the simulation clock.
           const minutes = lastMinute + (state.running ? Math.min(1000, now - anchor) / 1000 * 25 / 60 : 0)
-          const visible = render.render({ seed: state.worldSeed, player: { x: state.playerX, y: state.playerY }, playerFacing: state.playerFacing, minutes, now, ...settings.current, route: route.current, reducedMotion, discoveries: state.discoveries, residentOverrides: state.residentOverrides })
+          const visible = render.render({ seed: state.worldSeed, player: { x: state.playerX, y: state.playerY }, playerFacing: state.playerFacing, minutes, now, ...settings.current, route: route.current, reducedMotion, discoveries: state.discoveries, residentOverrides: state.residentOverrides, businesses: state.businesses })
           livePeople.current = visible
           if (now - lastUi > 150) {
             lastUi = now; setPeople(visible)
@@ -181,7 +184,7 @@ export function WorldView({ onNavigate }: { onNavigate: (screen: WorldScreen) =>
     const onKeyDown = (event: KeyboardEvent) => {
       if (isTyping(event.target) || event.altKey || event.ctrlKey || event.metaKey || useGameStore.getState().assistantOpen) return
       const key = event.key.length === 1 ? event.key.toLowerCase() : event.key
-      if (key === 'Escape') { clear(); setSelected(null); setTalking(null); setJournal(false); setAreaInfo(false); setAnimal(null); setHome(null); return }
+      if (key === 'Escape') { clear(); setSelected(null); setTalking(null); setJournal(false); setAreaInfo(false); setAnimal(null); setHome(null); setShop(null); return }
       if (overlay.current) {
         // Inside a home, with no chat open yet, E still starts talking to
         // whoever's in there -- same shortcut as outdoors, just aimed at
@@ -251,16 +254,17 @@ export function WorldView({ onNavigate }: { onNavigate: (screen: WorldScreen) =>
       <div className="world-location-chip">✦ {Math.abs(playerX) <= 3 && Math.abs(playerY) <= 3 ? 'Town square' : locationName(playerX, playerY, seed)}<span>{BIOMES[biomeAt(playerX, playerY, seed)].name} · {people.length} neighbours nearby</span></div>
       {message && <div className="world-toast" role="status">{message}</div>}
       <div className="world-dpad"><span />{pad('ArrowUp', '↑', 'Walk north')}<span />{pad('ArrowLeft', '←', 'Walk west')}<button title="Return to town square" aria-label="Return to town square" onClick={() => { route.current = []; held.current = []; setSelected(null); useGameStore.getState().returnToTown() }}>⌂</button>{pad('ArrowRight', '→', 'Walk east')}<span />{pad('ArrowDown', '↓', 'Walk south')}<span /></div>
-      {!talking && !journal && !areaInfo && !home && (person ? <div className="world-interaction" data-interaction="resident" aria-live="polite">{selected && <button className="world-close" aria-label="Close resident details" onClick={() => setSelected(null)}>×</button>}<small>{target?.kind === 'resident' && target.person.resident.id === person.resident.id ? 'NEARBY · PRESS E TO TALK' : 'A NEIGHBOUR'}</small><strong>{person.resident.name} <span>· {person.resident.role}</span></strong><p>{person.activity}</p><button className="world-enter" onClick={() => talkTo(person)}>Talk{target?.kind === 'resident' && target.person.resident.id === person.resident.id && <kbd>E</kbd>}</button></div>
+      {!talking && !journal && !areaInfo && !home && !shop && (person ? <div className="world-interaction" data-interaction="resident" aria-live="polite">{selected && <button className="world-close" aria-label="Close resident details" onClick={() => setSelected(null)}>×</button>}<small>{target?.kind === 'resident' && target.person.resident.id === person.resident.id ? 'NEARBY · PRESS E TO TALK' : 'A NEIGHBOUR'}</small><strong>{person.resident.name} <span>· {person.resident.role}</span></strong><p>{person.activity}</p><button className="world-enter" onClick={() => talkTo(person)}>Talk{target?.kind === 'resident' && target.person.resident.id === person.resident.id && <kbd>E</kbd>}</button></div>
         : animal ? <div className="world-interaction"><button className="world-close" aria-label="Close animal details" onClick={() => setAnimal(null)}>×</button><small>A LITTLE LOCAL</small><strong style={{ textTransform: 'capitalize' }}>{animal.animal.kind}</strong><p>{animal.activity}</p></div>
         : insideNow ? <div className="world-interaction" aria-live="polite"><small>COME ON IN</small><strong>{insideNow.resident.name}’s home</strong><p>{insideNow.activity}</p><button className="world-enter" onClick={() => setHome(insideNow)}>Look inside <kbd>E</kbd></button></div>
-        : interaction && <div className="world-interaction" aria-live="polite"><small>{interaction.poi.screen ? 'COME ON IN' : discovered ? 'DISCOVERED' : 'A PLACE TO EXPLORE'}</small><strong>{interaction.poi.label}</strong>{discovered ? <p>{interaction.poi.item ? `${interaction.poi.item.name} is in your journal.` : interaction.poi.flavor}</p> : <button className="world-enter" onClick={interact}>{interaction.poi.screen ? 'Enter' : interaction.poi.item ? 'Explore & collect' : 'Look around'} <kbd>E</kbd></button>}</div>)}
-      {home && <HomeInterior key={home.resident.id} person={home} crowded={!!talking} onClose={() => { setHome(null); setTalking(null); canvas.current?.focus({ preventScroll: true }) }} onTalk={() => talkTo(home)} />}
-      {talking && <ResidentChat key={talking.resident.id} person={talking} onClose={() => { setTalking(null); canvas.current?.focus({ preventScroll: true }) }} onEnter={position => { setTalking(null); setHome(position) }} />}
+        : interaction && <div className="world-interaction" aria-live="polite"><small>{interaction.poi.screen || interaction.poi.shop ? 'COME ON IN' : discovered ? 'DISCOVERED' : 'A PLACE TO EXPLORE'}</small><strong>{interaction.poi.label}</strong>{discovered ? <p>{interaction.poi.item ? `${interaction.poi.item.name} is in your journal.` : interaction.poi.flavor}</p> : <button className="world-enter" onClick={interact}>{interaction.poi.screen || interaction.poi.shop ? 'Enter' : interaction.poi.item ? 'Explore & collect' : 'Look around'} <kbd>E</kbd></button>}</div>)}
+      {home && <HomeInterior key={`home:${home.resident.id}`} person={home} crowded={!!talking} onClose={() => { setHome(null); setTalking(null); canvas.current?.focus({ preventScroll: true }) }} onTalk={() => talkTo(home)} />}
+      {shop && <ShopInterior key={`shop:${shop.label}`} kind={shop.type} label={shop.label} onClose={() => { setShop(null); canvas.current?.focus({ preventScroll: true }) }} />}
+      {talking && <ResidentChat key={`chat:${talking.resident.id}`} person={talking} onClose={() => { setTalking(null); canvas.current?.focus({ preventScroll: true }) }} onEnter={position => { setTalking(null); setHome(position) }} />}
       {areaInfo && <aside className="world-area-info" id="world-area-info" role="dialog" aria-label="Around you" onKeyDown={e => { if (e.key === 'Escape') { setAreaInfo(false); canvas.current?.focus({ preventScroll: true }) } }}>
         <header><strong>Around you</strong><button autoFocus aria-label="Close area information" onClick={() => { setAreaInfo(false); canvas.current?.focus({ preventScroll: true }) }}>×</button></header>
         <div className="world-notes">
-      <div className="world-town-note"><p className="world-eyebrow">{BIOMES[biomeAt(playerX, playerY, seed)].name.toUpperCase()}</p><p>{BIOMES[biomeAt(playerX, playerY, seed)].description} Look for ruins west of town, and a camp and community harvest to the south.</p>{rivals.some(r => !r.closed) && <small>Open in the local economy: {rivals.filter(r => !r.closed).map(r => r.name).join(' · ')}</small>}</div>
+      <div className="world-town-note"><p className="world-eyebrow">{BIOMES[biomeAt(playerX, playerY, seed)].name.toUpperCase()}</p><p>{BIOMES[biomeAt(playerX, playerY, seed)].description} Look for ruins west of town, and a camp and community harvest to the south.</p>{rivals.some(r => !r.closed) && <small>Open around the world: {rivals.filter(r => !r.closed).map(r => `${r.name} (${r.location})`).join(' · ')}</small>}</div>
       <div><p className="world-eyebrow">LIFE AROUND YOU</p><div className="world-activity">{people.slice(0, 8).map(p => <button key={p.resident.id} onClick={() => { setSelected(p); setAreaInfo(false); canvas.current?.focus({ preventScroll: true }) }}><span className="activity-dot" /><span><strong>{p.resident.name}</strong><small>{p.activity}</small></span></button>)}{people.length === 0 && <p className="world-muted">{useGameStore.getState().hour < 6 || useGameStore.getState().hour >= 20 ? 'The neighbourhood is resting. People return in the morning.' : 'A quiet stretch. Follow the road to meet the neighbours.'}</p>}</div></div>
     </div></aside>}
       {journal && <CollectionJournal onClose={() => setJournal(false)} />}

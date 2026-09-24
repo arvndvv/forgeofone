@@ -40,3 +40,37 @@ export async function conversationReply(system: string, messages: Message[], fal
     return result.ok && result.text ? { text: result.text, notice: '' } : { text: fallback, notice: `${result.error || 'Local chat is unavailable.'} Showing an offline reply.` }
   } catch { return { text: fallback, notice: 'Local chat is unavailable. Showing an offline reply.' } }
 }
+
+/** Whether the player is currently set up for AI-backed generation --
+ *  connected to Ollama with a chosen model, not just "offline replies"
+ *  selected. Everything that reads this degrades to static, hand-authored
+ *  content when it's false; nothing ever blocks on it being true. */
+export function aiReady(): boolean {
+  const config = useLocalAI.getState()
+  return config.mode === 'ollama' && !!config.model
+}
+
+/** For background *content* generation (challenges, job postings) rather
+ *  than a conversational reply -- asks for JSON, gets more room to answer
+ *  in, and returns null instead of any fallback text on failure so the
+ *  caller always has an explicit "didn't work, use the static pool"
+ *  signal instead of a piece of prose pretending to be data. Never throws. */
+export async function generateJSON(system: string, user: string, maxTokens = 500): Promise<unknown | null> {
+  const config = useLocalAI.getState()
+  if (config.mode !== 'ollama' || !config.model) return null
+  try {
+    const result = await ollamaChat({
+      model: config.model,
+      messages: [{ role: 'system', content: system.slice(0, 6500) }, { role: 'user', content: user.slice(0, 2000) }],
+      json: true,
+      maxTokens,
+    })
+    if (!result.ok || !result.text) return null
+    // Ollama's JSON mode is reliably an object/array, but a small local
+    // model can still wrap it in prose or a code fence -- pull out the
+    // first {...} or [...] block rather than trusting the whole string.
+    const match = result.text.match(/[[{][\s\S]*[\]}]/)
+    if (!match) return null
+    return JSON.parse(match[0])
+  } catch { return null }
+}
