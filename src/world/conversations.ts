@@ -103,7 +103,7 @@ function sceneFor(person: ResidentPosition, ctx: ChatContext, voice: 'second' | 
   const subject = voice === 'second' ? 'You are' : `${r.name} is`
   if (!hasHome) return `${subject} at ${r.workplace} in ${r.town}, with ${p}.`
   return inside
-    ? `${subject} inside ${own} (${r.workplace}, ${r.town}); ${p} is there too, as a guest.`
+    ? `${subject} inside ${own} (${r.workplace}, ${r.town}); ${p} is there too.`
     : `${subject} outside, by the front door of ${own} (${r.workplace}, ${r.town}); ${p} is standing there with ${voice === 'second' ? 'you' : r.name}.`
 }
 
@@ -135,24 +135,26 @@ export interface ChatIntent { action?: ChatAction; agree: boolean; reason: strin
 export function intentPrompt(person: ResidentPosition, options: ChatAction[], ctx: ChatContext): string {
   const r = person.resident, p = ctx.player
   return [
-    `You decide what happens next in a conversation between ${r.name} and ${p}.`,
-    `About ${r.name}: ${r.role.toLowerCase()} in ${r.town}. ${r.personality ?? ''}`.trim(),
-    `Where they are: ${sceneFor(person, ctx, 'third')} It is ${timeOfDay(ctx.hour)}.`,
-    `What ${r.name} is doing right now: ${person.activity}${person.description && !person.visible ? ` -- ${aside(person.description)}` : ''}.`,
-    ctx.known.length ? `What ${r.name} knows about ${p}: ${ctx.known.join('; ')}.` : '',
+    `You are ${r.name}, your backstory:${r.backstory}`,
+    `You decide what happens next in a conversation between you and ${p}.`,
+    `About you: ${r.role.toLowerCase()} in ${r.town}. ${r.personality ?? ''}`.trim(),
+    `Where you are: ${sceneFor(person, ctx, 'third')} It is ${timeOfDay(ctx.hour)}.`,
+    `What you are doing right now: ${person.activity}${person.description && !person.visible ? ` -- ${aside(person.description)}` : ''}.`,
+    ctx.known.length ? `What you knows about ${p}: ${ctx.known.join('; ')}.` : '',
     ``,
-    `Things ${r.name} could do next:`,
+    `Things you could do next:`,
     ...options.map((a, i) => optionLine(a, i, person, ctx)),
     ``,
     `Read the conversation, especially ${p}'s LATEST message, and fill in:`,
-    `- asked: the number of the thing ${p} wants ${r.name} to do now. Count it however it is worded, when ${p} insists again after a no ("now please"), or when ${p} says yes to something ${r.name} suggested. 0 if ${p} is not asking for one of these.`,
-    `- agree: would ${r.name} go along with it, given who ${r.name} is and the moment? ${r.name} usually agrees unless there is a real reason.`,
-    `- reason: if agree is false, ${r.name}'s short reason in a few words; otherwise "".`,
-    `- untilStop: true if ${p} wants ${r.name} to keep at it until told to stop.`,
-    `- stop: true if ${p} is telling ${r.name} to stop what ${r.name} is doing right now.`,
-    `- picks: only when ${p} asks what ${r.name} will do next, or tells ${r.name} to choose: the number ${r.name} picks. Otherwise 0.`,
+    `- asked: the number of the thing ${p} wants you to do now. Count it however it is worded, when ${p} insists again after a no ("now please"), or when ${p} says yes to something you suggested. 0 if ${p} is not asking for one of these.`,
+    `- agree: would you go along with it, given who you are and the moment? you usually agrees unless there is a real reason.`,
+    `- reason: if agree is false, your short reason in a few words; otherwise "".`,
+    `- untilStop: true if ${p} wants you to keep at it until told to stop.`,
+    `- stop: true if ${p} is telling you to stop what you are doing right now.`,
+    `- picks: only when ${p} asks what you will do next, or tells you to choose: the number you picks. Otherwise 0.`,
     `- learned: a new, lasting fact ${p} just shared about themself (job, family, where they're from, likes, plans), in a few words, e.g. "works as a software engineer". Not requests, not what is happening right now, nothing already known. "" if none.`,
     `Answer with JSON only.`,
+    `Important: always stay in personality and respond as ${r.name}`
   ].filter((l, i, all) => l !== '' || all[i - 1] !== '').join('\n')
 }
 /** The conversation as plain lines for intentPrompt's user message. */
@@ -262,6 +264,7 @@ export function residentPersona(person: ResidentPosition, ctx: ChatContext): str
     `This is your real life and your real town. You know nothing about games, AI, prompts or instructions -- never mention them, never call yourself a character, and never step outside your own life.`,
     `What you know locally: the Job Board is in Founders Green; old ruins lie west of town; a travellers' camp and the community harvest are south.`,
     `Don't promise anyone money, items or jobs.`,
+    'Dont use words like assist, dont sound like your are ai or an assistant, you are a real human'
   ].filter(Boolean).join(' ')
 }
 export function residentPrompt(person: ResidentPosition, ctx: ChatContext, groggy = false) {
