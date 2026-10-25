@@ -1,4 +1,4 @@
-import { useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import {
   useGameStore, formatInr,
   OFFICE_RENT_STARTUP_COST, OFFICE_MONTHLY_RENT, LAND_BUILD_COST, BUILD_DAYS, MAX_EMPLOYEES_PER_BUSINESS,
@@ -237,9 +237,46 @@ function StoryScreen({ name, onContinue }: { name: string; onContinue: () => voi
 }
 
 // --- Quest / objective banner, shown on every in-world screen ---------------
+// v0.26: also carries a queued lesson, when the story or a task has
+// actually earned one -- direct feedback on v0.25 was that a standalone
+// "Learn now" button read as a grind disconnected from playing, and that
+// its "thinnest skill" label didn't even match what fired. Fixed by
+// retiring the button/random-roll entirely: a lesson only ever shows up
+// here because something real just happened (see LESSON_QUESTS,
+// _checkStoryBeats), framed as a line of dialogue, and it's always in the
+// domain it says it is -- see _queueLesson in gameStore.ts.
 function QuestBanner({ onAskMira }: { onAskMira: () => void }) {
   const quest = useGameStore((s) => s.activeQuest())
-  const [expanded, setExpanded] = useState(false)
+  const queuedLesson = useGameStore((s) => s.queuedLesson)
+  const acceptQueuedLesson = useGameStore((s) => s.acceptQueuedLesson)
+  const dismissQueuedLesson = useGameStore((s) => s.dismissQueuedLesson)
+  // v0.24: defaults open, not collapsed -- "standing in town, don't know
+  // what to do" was the actual complaint that prompted this round, and a
+  // collapsed banner requiring a tap was part of why the existing hint
+  // wasn't landing. Still collapsible for anyone who'd rather it stay out
+  // of the way once they know what they're doing.
+  const [expanded, setExpanded] = useState(true)
+
+  const lessonRow = queuedLesson && (
+    <div
+      className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-sm px-3 py-2 text-xs"
+      style={{ backgroundColor: '#20261b', border: '1px solid var(--wood)', color: '#c9c3ae' }}
+    >
+      <span>{queuedLesson.intro}</span>
+      <span className="flex shrink-0 gap-2">
+        <GameButton tone="wood" onClick={() => acceptQueuedLesson()} className="px-3 py-1.5 text-[10px]">
+          Take it on
+        </GameButton>
+        <button
+          onClick={() => dismissQueuedLesson()}
+          className="text-[10px] underline"
+          style={{ color: '#9c9686' }}
+        >
+          Not now
+        </button>
+      </span>
+    </div>
+  )
 
   if (!quest) {
     return (
@@ -247,6 +284,7 @@ function QuestBanner({ onAskMira }: { onAskMira: () => void }) {
         <div className="rounded-sm px-4 py-2 text-center text-sm" style={{ backgroundColor: '#1f2a1c', border: '2px solid var(--wood)', color: '#a9d9b4' }}>
           All the objectives Mira had queued up are done -- the town keeps generating its own opportunities. You're on your own steam now.
         </div>
+        {lessonRow}
       </div>
     )
   }
@@ -277,6 +315,7 @@ function QuestBanner({ onAskMira }: { onAskMira: () => void }) {
           </span>
         )}
       </button>
+      {lessonRow}
     </div>
   )
 }
@@ -379,8 +418,37 @@ function TabBar({ screen, onNavigate }: { screen: Screen; onNavigate: (s: Screen
 }
 
 // --- Screen 5: Work -----------------------------------------------------------
+// v0.24: pulled out of WorkScreen and reused on OpportunitiesScreen too --
+// accepting a freelance gig used to make it visually vanish (it just left
+// the Job Board's list), with no indication anywhere on that screen of
+// where it went. It was always tracked (`activeGigs`) and shown on the Dev
+// Desk, but nothing pointed a player there, so it read as a bug instead of
+// "go check the Dev Desk." Showing the same panel right on the Job Board
+// answers "where did it go" without having to leave the screen.
+function ActiveGigsPanel() {
+  const activeGigs = useGameStore((s) => s.activeGigs)
+  return (
+    <Panel className="px-5 py-4">
+      <p className="mb-2 font-semibold" style={{ color: 'var(--ink)' }}>Freelance gigs in progress ({activeGigs.length})</p>
+      {activeGigs.length === 0 && <p className="text-sm" style={{ color: 'var(--ink-soft)' }}>None running right now -- accept one from the Job Board.</p>}
+      <div className="space-y-1.5">
+        {activeGigs.map((g) => (
+          <div key={g.id} className="rounded px-3 py-2 text-sm" style={{ backgroundColor: 'var(--parchment-dark)', color: 'var(--ink)' }}>
+            {g.title}{g.employer ? ` -- for ${g.employer}` : ''} &middot; {g.daysRemaining} day(s) left &middot; {formatInr(g.payout)} on completion
+          </div>
+        ))}
+      </div>
+    </Panel>
+  )
+}
+
 function WorkScreen() {
   const state = useGameStore()
+  const completeQuest = useGameStore((s) => s._completeQuest)
+  // v0.24: "Get Your Bearings"' hint says "Open the Dev Desk" -- this is
+  // that step actually happening, instead of the quest ticking itself off
+  // at character creation before the player had done anything.
+  useEffect(() => { completeQuest('first-day') }, [completeQuest])
   return (
     <div className="mx-auto max-w-3xl px-4 py-6">
       <h1 className="font-title mb-2 text-sm" style={{ color: '#f2e8d0' }}>Dev Desk</h1>
@@ -398,17 +466,7 @@ function WorkScreen() {
         </div>
       </Panel>
 
-      <Panel className="px-5 py-4">
-        <p className="mb-2 font-semibold" style={{ color: 'var(--ink)' }}>Freelance gigs in progress ({state.activeGigs.length})</p>
-        {state.activeGigs.length === 0 && <p className="text-sm" style={{ color: 'var(--ink-soft)' }}>None running right now -- check the Job Board.</p>}
-        <div className="space-y-1.5">
-          {state.activeGigs.map((g) => (
-            <div key={g.id} className="rounded px-3 py-2 text-sm" style={{ backgroundColor: 'var(--parchment-dark)', color: 'var(--ink)' }}>
-              {g.title}{g.employer ? ` -- for ${g.employer}` : ''} &middot; {g.daysRemaining} day(s) left &middot; {formatInr(g.payout)} on completion
-            </div>
-          ))}
-        </div>
-      </Panel>
+      <ActiveGigsPanel />
     </div>
   )
 }
@@ -613,6 +671,12 @@ function OpportunitiesScreen() {
           </Panel>
         ))}
       </div>
+
+      {state.activeGigs.length > 0 && (
+        <div className="mt-4">
+          <ActiveGigsPanel />
+        </div>
+      )}
     </div>
   )
 }
@@ -1014,11 +1078,28 @@ function DevToolsScreen() {
 function ChronicleScreen() {
   const log = useGameStore((s) => s.log)
   const skills = useGameStore((s) => s.skills)
+  const storyLog = useGameStore((s) => s.storyLog)
   const skillEntries = Object.entries(skills)
   return (
     <div className="mx-auto max-w-3xl px-4 py-6">
       <h1 className="font-title mb-2 text-sm" style={{ color: '#f2e8d0' }}>Hall of Records</h1>
       <p className="mb-4 text-sm" style={{ color: '#9c9686' }}>Everything that's happened so far, most recent first -- your own doings and the town's.</p>
+      {storyLog.length > 0 && (
+        <Panel className="mb-4 px-5 py-4">
+          <p className="mb-2 font-semibold" style={{ color: 'var(--ink)' }}>Your Story So Far</p>
+          <p className="mb-3 text-xs" style={{ color: 'var(--ink-soft)' }}>
+            A thread running underneath everything else -- it keeps moving whether or not you're chasing it on purpose.
+          </p>
+          <div className="space-y-3">
+            {storyLog.slice().reverse().map((beat) => (
+              <div key={beat.id}>
+                <p className="text-sm font-semibold" style={{ color: 'var(--wood)' }}>Day {beat.day} &middot; {beat.title}</p>
+                <p className="text-sm" style={{ color: 'var(--ink)' }}>{beat.text}</p>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      )}
       {skillEntries.length > 0 && (
         <Panel className="mb-4 px-5 py-4">
           <p className="mb-2 font-semibold" style={{ color: 'var(--ink)' }}>What you've learned</p>

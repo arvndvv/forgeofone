@@ -111,6 +111,16 @@ export interface Business {
   /** Real candidates from the most recent postOpening() call, waiting on
    *  an accept/decline -- cleared (or replaced) once acted on. */
   applicants?: Applicant[]
+  /** The real, already-generated Building.id (world/generation.ts) this
+   *  business claimed as its premises at founding -- see gameStore's
+   *  pickPremisesBuilding(). A genuinely walkable structure the player can
+   *  find in `location`, not a new one authored from scratch (the game's
+   *  world generation is a pure, cached function of the seed alone, so a
+   *  truly novel building would break that everywhere else it's relied on
+   *  -- claiming a real, otherwise-unclaimed building is the safe
+   *  equivalent). Optional so businesses founded before v0.23 still load;
+   *  those just have no map presence, same as before this existed. */
+  buildingId?: string
 }
 
 export interface LogEntry {
@@ -137,6 +147,10 @@ export interface RivalBusiness {
   /** Town this rival is based in -- rivals are spread across the whole
    *  generated world, not just the player's home town. */
   location: string
+  /** Same idea as Business.buildingId -- a real building in `location`
+   *  this rival claimed at open time, so it's a walkable place, not just a
+   *  name. Optional so rivals opened before v0.23 still load fine. */
+  buildingId?: string
 }
 
 export interface ChatMessage {
@@ -263,6 +277,42 @@ export interface Challenge {
    *  hand-written -- lets the pool it lives in (and its removal once
    *  used) be told apart from the fixed seed content. */
   aiGenerated?: true
+}
+
+/** A named domain expert the connected AI has created on the fly, at a real
+ *  building in a real town (see world/residents.ts's pickExpertSpot/
+ *  dynamicExpertResidents) -- gameStore's ensureExpertFor calls for one when
+ *  a challenge domain has neither a hand-authored PINNED_RESIDENTS entry
+ *  nor one of these yet. Same "no invented-out-of-thin-air place" rule as
+ *  every other AI feature: the model only drafts name/role/backstory, game
+ *  code always assigns the real building/town/sprite. Persisted, so once
+ *  created a domain keeps the same named expert for the rest of the save --
+ *  never recreated, never silently swapped out. AI-only: with no local
+ *  model connected, a domain with no static expert just stays anonymous,
+ *  same as before this existed. */
+export interface DynamicExpert {
+  id: string
+  name: string
+  role: string
+  interest: string
+  backstory: string
+  domain: SkillDomain
+  location: string
+  buildingId: string
+  sprite: number
+  createdOnDay: number
+}
+
+/** One fired beat of the background story arc (see gameStore's
+ *  _checkStoryBeats, run every daily tick regardless of what the player is
+ *  doing) -- a small, ordered narrative thread layered on top of the free-
+ *  play economy, not a separate mode the player opts into. `id` matches a
+ *  STORY_ARC entry (gameStore.ts) and each one fires at most once per save. */
+export interface StoryBeat {
+  id: string
+  day: number
+  title: string
+  text: string
 }
 
 export interface Loan {

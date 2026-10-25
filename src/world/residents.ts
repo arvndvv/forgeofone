@@ -1,7 +1,7 @@
 import { hashCoord, getSettlement, getTile, listWorldTowns, type Point, type Settlement } from './generation'
 import { findPath } from './pathfinding'
 import { facingForStep, type Facing } from './facing'
-import type { Applicant, Employee, SkillDomain } from '../types/game'
+import type { Applicant, Employee, DynamicExpert, SkillDomain } from '../types/game'
 import tamPortrait from '../assets/game/characters/npc-villager4.png'
 export type Activity = 'walking' | 'baking' | 'gardening' | 'selling' | 'repairing' | 'painting' | 'delivery' | 'reading' | 'resting' | 'chatting' | 'sleeping' | 'cooking' | 'playing' | 'home'
 /** Which drawn room a 'home' stop shows in HomeInterior.tsx -- picks the
@@ -256,6 +256,41 @@ export function pickApplicants(seed: number, townName: string, excludeIds: Set<s
   return picked
 }
 
+/** Picks a real, unclaimed, non-home building in `townName` for a business
+ *  or rival to physically claim as its premises -- same "claim something
+ *  real rather than invent it" rule as pickEmployer's company building. The
+ *  world's own building layout is a pure, cached function of the seed
+ *  alone (everything from pathfinding to tile rendering depends on that
+ *  staying true), so a genuinely new structure isn't safe to conjure at
+ *  runtime -- claiming a real, otherwise-unclaimed one is the equivalent
+ *  that is. `excludeBuildingIds` should list every building any other
+ *  business/rival has already claimed, so nobody doubles up. Returns
+ *  undefined if the town has no eligible slot left. */
+export function pickPremisesBuilding(seed: number, townName: string, excludeBuildingIds: Set<string>): string | undefined {
+  const town = listWorldTowns(seed).find(t => t.name === townName)
+  if (!town) return undefined
+  const candidates = town.buildings.filter(b => b.kind !== 'home' && !b.poi?.screen && !excludeBuildingIds.has(b.id))
+  if (!candidates.length) return undefined
+  return candidates[Math.floor(Math.random() * candidates.length)].id
+}
+
+export interface ExpertSpot { location: string; buildingId: string; sprite: number }
+
+/** Picks a real town and a real, unclaimed non-home building for a newly
+ *  AI-created domain expert (see gameStore's ensureExpertFor) to be
+ *  anchored at -- same rule as pickPremisesBuilding, with its own
+ *  exclusion set so an expert never claims a building a business, rival,
+ *  or another expert already has. `sprite` is just a fresh outfit index
+ *  (0-7) so experts don't all look identical. */
+export function pickExpertSpot(seed: number, excludeBuildingIds: Set<string>): ExpertSpot | undefined {
+  const towns = listWorldTowns(seed)
+  const town = towns[Math.floor(Math.random() * towns.length)]
+  const candidates = town.buildings.filter((b) => b.kind !== 'home' && !b.poi?.screen && !excludeBuildingIds.has(b.id))
+  if (!candidates.length) return undefined
+  const building = candidates[Math.floor(Math.random() * candidates.length)]
+  return { location: town.name, buildingId: building.id, sprite: Math.floor(Math.random() * 8) }
+}
+
 function openSpot(point: Point, seed: number): Point {
   for (let r = 0; r < 5; r++) for (let y = -r; y <= r; y++) for (let x = -r; x <= r; x++) if (getTile(point.x + x, point.y + y, seed).walkable) return { x: point.x + x, y: point.y + y }
   return point
@@ -305,6 +340,32 @@ export function employeeResidents(seed: number, businesses: Array<{ id: string; 
         bucketMinutes: 1440,
       })
     }
+  }
+  return out
+}
+
+/** Real, on-the-map presence for every AI-created domain expert (see
+ *  gameStore's ensureExpertFor/DynamicExpert) -- same "build an ordinary
+ *  Resident, reuse the existing position/render pipeline" trick as
+ *  employeeResidents() above, placed just outside their claimed building's
+ *  door (openSpot), same convention the hand-authored PINNED_RESIDENTS
+ *  use. Not cached, for the same reason employeeResidents() isn't: the
+ *  list changes live (a new expert can appear mid-session) and is always
+ *  tiny. */
+export function dynamicExpertResidents(seed: number, experts: DynamicExpert[]): Resident[] {
+  const out: Resident[] = []
+  for (const expert of experts) {
+    const town = listWorldTowns(seed).find((t) => t.name === expert.location)
+    const building = town?.buildings.find((b) => b.id === expert.buildingId)
+    if (!town || !building) continue
+    const post = openSpot({ x: building.door.x, y: building.door.y + 1 }, seed)
+    out.push({
+      id: `expert:${expert.id}`, name: expert.name, role: expert.role, town: town.name,
+      workplace: building.label, interest: expert.interest, backstory: expert.backstory, sprite: expert.sprite,
+      home: post, post, lane: 0, shift: 0, duration: 1440, stops: [],
+      outdoorActivities: [{ action: 'chatting', label: `At ${building.label}` }],
+      bucketMinutes: 1440,
+    })
   }
   return out
 }

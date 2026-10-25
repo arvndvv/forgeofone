@@ -172,13 +172,19 @@ export function nearbySettlements(x: number, y: number, seed: number, radius: nu
 
 /** A fixed slate of real, already-generated towns spread across the world --
  *  the pool the economy simulation (rival businesses, job/business
- *  postings, and the player's own "found a firm" flow) draws locations
- *  from, so "multiple companies across the world" means actual named
- *  towns the player can walk to, not flavor text. A 5x5 block of regions
- *  centered on the origin town -- 25 towns, always includes Founders
- *  Green itself. */
+ *  postings, the player's own "found a firm" flow, and now dynamic
+ *  experts) draws locations from, so "multiple companies across the
+ *  world" means actual named towns the player can walk to, not flavor
+ *  text. A 7x7 block of regions centered on the origin town -- 49 towns,
+ *  always includes Founders Green itself. Widened from a 5x5/25-town
+ *  block in v0.23 as a deliberately modest, scoped-down stand-in for
+ *  on-demand "town adding": the settlement generator itself is still a
+ *  pure, cached function of (seed, coordinates) with nothing invented at
+ *  runtime (see MAX_REGIONS above -- 49 fits well under its 64-region
+ *  cache cap), this just widens the slice of that same deterministic
+ *  world the economy simulation is allowed to draw from. */
 export function listWorldTowns(seed: number): Settlement[] {
-  return nearbySettlements(0, 0, seed, 140)
+  return nearbySettlements(0, 0, seed, 200)
 }
 
 function tile(type: Tile['type'], decor: Decor = null, walkable = true, poi: PointOfInterest | null = null): Tile {

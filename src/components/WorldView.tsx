@@ -133,7 +133,7 @@ export function WorldView({ onNavigate }: { onNavigate: (screen: WorldScreen) =>
           // Smooth between the existing one-second simulation ticks. Clamp when
           // the tab is suspended so the view cannot outrun the simulation clock.
           const minutes = lastMinute + (state.running ? Math.min(1000, now - anchor) / 1000 * 25 / 60 : 0)
-          const visible = render.render({ seed: state.worldSeed, player: { x: state.playerX, y: state.playerY }, playerFacing: state.playerFacing, minutes, now, ...settings.current, route: route.current, reducedMotion, discoveries: state.discoveries, residentOverrides: state.residentOverrides, businesses: state.businesses })
+          const visible = render.render({ seed: state.worldSeed, player: { x: state.playerX, y: state.playerY }, playerFacing: state.playerFacing, minutes, now, ...settings.current, route: route.current, reducedMotion, discoveries: state.discoveries, residentOverrides: state.residentOverrides, businesses: state.businesses, rivalBusinesses: state.rivalBusinesses, dynamicExperts: state.dynamicExperts })
           livePeople.current = visible
           if (now - lastUi > 150) {
             lastUi = now; setPeople(visible)

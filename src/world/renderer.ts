@@ -1,13 +1,13 @@
 import atlasUrl from '../assets/game/world/town-atlas.png'
 import farmUrl from '../assets/game/world/farm-atlas.png'
 import { CHUNK_SIZE, getTile, hashCoord, nearbySettlements, type Building, type Point } from './generation'
-import { getResidents, residentPosition, employeeResidents, type ResidentPosition, type ResidentOverride } from './residents'
+import { getResidents, residentPosition, employeeResidents, dynamicExpertResidents, type ResidentPosition, type ResidentOverride } from './residents'
 import { BIOMES, biomeAt, grassColor } from './regions'
 import { getAnimals, animalPosition, type AnimalPosition } from './wildlife'
 import { drawPlayer, drawResident } from './characterArt'
 import { drawAnimal } from './animalArt'
 import type { Facing } from './facing'
-import type { TileType, Business } from '../types/game'
+import type { TileType, Business, RivalBusiness, DynamicExpert } from '../types/game'
 
 export const MAP_COLORS: Record<TileType, string> = { grass: '#83b96b', path: '#d3b080', plaza: '#c0bc98', plot: '#88725a', water: '#5a99ac', sand: '#dec691', bridge: '#ab8056', field: '#a7af57' }
 export interface RenderState {
@@ -15,11 +15,19 @@ export interface RenderState {
   route: Point[]; labels: boolean; selected: string | null; reducedMotion: boolean
   discoveries: Record<string, true>
   residentOverrides: Record<string, ResidentOverride>
-  /** The player's own founded businesses -- used only to place their
-   *  onsite hires physically on the map (see employeeResidents() below).
-   *  Optional so a caller that never sends businesses still renders fine
-   *  with nobody's staff shown. */
+  /** The player's own founded businesses -- places their onsite hires
+   *  physically on the map (employeeResidents()) and, for any business
+   *  that's claimed a real building (Business.buildingId, v0.23), swaps
+   *  that building's drawn label for the business's own name. Optional so
+   *  a caller that never sends businesses still renders fine with none of
+   *  this. */
   businesses?: Business[]
+  /** Same building-label override as `businesses`, for rivals that have
+   *  claimed a building (RivalBusiness.buildingId). */
+  rivalBusinesses?: RivalBusiness[]
+  /** AI-created domain experts (see gameStore's ensureExpertFor) -- placed
+   *  on the map the same way pinned/hired residents are. */
+  dynamicExperts?: DynamicExpert[]
 }
 
 const loadImage = (url: string) => new Promise<HTMLImageElement>((resolve, reject) => {
@@ -255,9 +263,11 @@ export async function createRenderer(canvas: HTMLCanvasElement, minimap: HTMLCan
       // doesn't appear twice at once.
       const onsiteIds = new Set((state.businesses ?? []).flatMap(b => (b.employees ?? []).filter(e => e.workMode === 'onsite').map(e => e.id)))
       const hired = employeeResidents(state.seed, state.businesses ?? [])
+      const experts = dynamicExpertResidents(state.seed, state.dynamicExperts ?? [])
       visibleResidents = [
         ...residentTowns.flatMap(t => getResidents(t, state.seed)).map(r => residentPosition(r, state.minutes, state.residentOverrides[r.id])).filter(p => p.visible && !onsiteIds.has(p.resident.id) && p.x >= left && p.x <= right && p.y >= top && p.y <= bottom),
         ...hired.map(r => residentPosition(r, state.minutes, state.residentOverrides[r.id])).filter(p => p.visible && p.x >= left && p.x <= right && p.y >= top && p.y <= bottom),
+        ...experts.map(r => residentPosition(r, state.minutes, state.residentOverrides[r.id])).filter(p => p.visible && p.x >= left && p.x <= right && p.y >= top && p.y <= bottom),
       ]
       visibleAnimals = towns.flatMap(t => getAnimals(t, state.seed)).map(a => animalPosition(a, state.minutes)).filter(p => p.x >= left && p.x <= right && p.y >= top && p.y <= bottom)
       for (const p of visibleAnimals) drawables.push({ depth: p.y + 0.81, draw: () => animal(p, state.reducedMotion ? 0 : state.minutes) })
@@ -282,7 +292,13 @@ export async function createRenderer(canvas: HTMLCanvasElement, minimap: HTMLCan
         drawPlayer(ctx, avatar.x, avatar.y, state.playerFacing, state.now, moving && !state.reducedMotion)
       } })
       drawables.sort((a, b) => a.depth - b.depth).forEach(d => d.draw())
-      if (state.labels) for (const b of visibleBuildings) if (b.kind !== 'home') label(b.label, b.x + b.width / 2, b.y - 0.45, !!b.poi)
+      // A business or rival that's claimed a real building (buildingId,
+      // v0.23) shows its own name on that building instead of the
+      // building's generic procedural one.
+      const claimedLabels = new Map<string, string>()
+      for (const b of state.businesses ?? []) if (b.buildingId) claimedLabels.set(b.buildingId, b.name)
+      for (const r of state.rivalBusinesses ?? []) if (r.buildingId && !r.closed) claimedLabels.set(r.buildingId, r.name)
+      if (state.labels) for (const b of visibleBuildings) if (b.kind !== 'home') label(claimedLabels.get(b.id) ?? b.label, b.x + b.width / 2, b.y - 0.45, !!b.poi)
       const minute = state.minutes % 1440
       const darkness = minute < 300 || minute > 1260 ? 0.38 : minute > 1080 ? (minute - 1080) / 180 * 0.38 : minute < 420 ? (420 - minute) / 120 * 0.38 : 0
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
