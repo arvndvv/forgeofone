@@ -3,6 +3,6 @@
 interface Window {
   forgeAI?: {
     models: () => Promise<{ ok: boolean; models: Array<{ name: string; size: number }>; error?: string }>
-    chat: (payload: { model: string; messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>; json?: boolean; maxTokens?: number }) => Promise<{ ok: boolean; text?: string; error?: string }>
+    chat: (payload: { model: string; messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>; json?: boolean; maxTokens?: number; schema?: Record<string, unknown>; temperature?: number }) => Promise<{ ok: boolean; text?: string; error?: string }>
   }
 }

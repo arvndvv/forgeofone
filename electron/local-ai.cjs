@@ -21,13 +21,17 @@ async function chat(payload) {
     // content, challenges) which needs more room and a parseable shape than an
     // ordinary chat reply -- clamped and validated, never trusted as-is.
     const numPredict = Math.min(800, Math.max(60, Number.isFinite(payload.maxTokens) ? payload.maxTokens : 180))
+    const temperature = Number.isFinite(payload.temperature) ? Math.min(1.2, Math.max(0, payload.temperature)) : 0.65
+    if (payload.schema !== undefined && (typeof payload.schema !== 'object' || payload.schema === null || Array.isArray(payload.schema) || JSON.stringify(payload.schema).length > 4000)) throw Error('Invalid reply schema.')
     const response = await fetch(`${OLLAMA}/api/chat`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(45000),
       body: JSON.stringify({
         model: payload.model, messages: payload.messages, stream: false,
         ...(/qwen3/i.test(payload.model) ? { think: false } : {}),
-        ...(payload.json ? { format: 'json' } : {}),
-        keep_alive: '2m', options: { num_predict: numPredict, num_ctx: 4096, temperature: 0.65 },
+        // A JSON schema (Ollama structured outputs, 0.5+) constrains the reply
+        // to exactly that shape; plain json mode only guarantees valid JSON.
+        ...(payload.schema ? { format: payload.schema } : payload.json ? { format: 'json' } : {}),
+        keep_alive: '2m', options: { num_predict: numPredict, num_ctx: 4096, temperature },
       }),
     })
     if (!response.ok) throw Error('The local model could not complete that reply.')

@@ -29,6 +29,8 @@ export interface ResidentOverride { indoors: boolean; action?: Activity; activit
 export interface Resident {
   id: string; name: string; role: string; town: string; workplace: string; interest: string; sprite: number
   home: Point; stops: Stop[]; duration: number; shift: number; lane: number; backstory?: string
+  /** How they talk and behave -- see PinnedResident.personality. */
+  personality?: string
   /** Chat portrait shown top-left of their chat box (see ResidentPortrait.tsx).
    *  Import a transparent-background PNG and pass its path; left unset, the
    *  chat falls back to a code-drawn portrait using `sprite`'s outfit. */
@@ -102,6 +104,12 @@ export interface PinnedResident {
    *  (see residentPrompt() in conversations.ts) so this character can
    *  roleplay consistently. Optional -- leave blank for no special lore. */
   backstory: string
+  /** How they talk and carry themselves -- tone, habits, quirks, how
+   *  easily they say yes. Goes straight into the local model's character
+   *  sheet (residentPersona() in conversations.ts) and matters more than
+   *  anything else for replies sounding like *them*. A few concrete
+   *  sentences beat a list of adjectives. Optional. */
+  personality?: string
   /** Which skill-coaching domains this character is the named expert for
    *  -- see the matching field on Resident above for how it's used. */
   expertise?: SkillDomain[]
@@ -152,6 +160,7 @@ export const PINNED_RESIDENTS: Record<string, PinnedResident[]> = {
   '1,0': [{
     id: 'elder-tam', name: 'Tam', role: 'Retired shopkeeper', interest: 'old trade routes and giving advice',
     backstory: 'Ran the first general store in Founders Green for thirty years before handing it down.',
+    personality: 'Warm, unhurried and a little nostalgic. Calls people "friend", loves telling stories about the old trade routes, and gently teases young folk who rush. Enjoys company and rarely turns a visitor away. Speaks plainly, with the odd shopkeeper saying.',
     expertise: ['negotiation', 'personal-finance'],
     col: 0, row: 0, sprite: 9,
     outdoorActivities: [
@@ -433,7 +442,7 @@ export function getResidents(town: Settlement, seed: number): Resident[] {
     const bucketMinutes = Math.round(minC + hashCoord(idSeed, 0, seed + 41) * (maxC - minC))
     residents.push({
       id: `${town.id}:pinned:${pinned.id}`, name: pinned.name, role: pinned.role, town: town.name,
-      workplace: building.label, interest: pinned.interest, backstory: pinned.backstory, sprite: pinned.sprite,
+      workplace: building.label, interest: pinned.interest, backstory: pinned.backstory, personality: pinned.personality, sprite: pinned.sprite,
       expertise: pinned.expertise,
       portrait: pinned.portrait, sprites: pinned.sprites, homeBuildingId: building.id,
       post, outdoorActivities: pinned.outdoorActivities, indoorActivities: pinned.indoorActivities,

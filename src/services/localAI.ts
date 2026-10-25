@@ -55,16 +55,15 @@ export function aiReady(): boolean {
  *  in, and returns null instead of any fallback text on failure so the
  *  caller always has an explicit "didn't work, use the static pool"
  *  signal instead of a piece of prose pretending to be data. Never throws. */
-export async function generateJSON(system: string, user: string, maxTokens = 500): Promise<unknown | null> {
+export async function generateJSON(system: string, user: string, maxTokens = 500, opts: { schema?: Record<string, unknown>; temperature?: number } = {}): Promise<unknown | null> {
   const config = useLocalAI.getState()
   if (config.mode !== 'ollama' || !config.model) return null
   try {
-    const result = await ollamaChat({
-      model: config.model,
-      messages: [{ role: 'system', content: system.slice(0, 6500) }, { role: 'user', content: user.slice(0, 2000) }],
-      json: true,
-      maxTokens,
-    })
+    const messages = [{ role: 'system' as const, content: system.slice(0, 6500) }, { role: 'user' as const, content: user.slice(0, 2000) }]
+    let result = await ollamaChat({ model: config.model, messages, json: true, maxTokens, schema: opts.schema, temperature: opts.temperature })
+    // Ollama older than 0.5 (no structured outputs) or an older desktop
+    // shell may reject a schema -- retry once with plain JSON mode.
+    if (opts.schema && !result.ok) result = await ollamaChat({ model: config.model, messages, json: true, maxTokens, temperature: opts.temperature })
     if (!result.ok || !result.text) return null
     // Ollama's JSON mode is reliably an object/array, but a small local
     // model can still wrap it in prose or a code fence -- pull out the
