@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useGameStore } from '../store/gameStore'
 import { conversationReply, useLocalAI } from '../services/localAI'
-import { residentReply, residentPrompt, TALK_TOPICS, residentDecisionPrompt, residentDecisionFallback, parseResidentDecision } from '../world/conversations'
+import { residentReply, residentPrompt, TALK_TOPICS, residentDecisionPrompt, residentDecisionFallback, parseResidentDecision, chatActions, requestedActions, actionRequestInstruction, parseActionRequest, chatActionSuffix, parseChatAction, type ChatAction } from '../world/conversations'
 import type { ResidentPosition } from '../world/residents'
 import { ResidentPortrait } from './ResidentPortrait'
 
@@ -16,8 +16,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout: T): Promise<
   })
 }
 
-export function ResidentChat({ person, onClose, onEnter }: { person: ResidentPosition; onClose: () => void; onEnter?: (position: ResidentPosition) => void }) {
-  const [messages, setMessages] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([])
+export function ResidentChat({ person, onClose, onEnter, onExit }: { person: ResidentPosition; onClose: () => void; onEnter?: (position: ResidentPosition) => void; onExit?: (position: ResidentPosition) => void }) {
+  // Restored from the store so the conversation continues across closing
+  // the panel, walking inside together, or pressing Talk again.
+  const [messages, setMessages] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>(() => useGameStore.getState().residentChats[person.resident.id] ?? [])
   const [draft, setDraft] = useState(''), [busy, setBusy] = useState(false), [notice, setNotice] = useState('')
   // Asleep residents don't get a real conversation until their own
   // schedule wakes them -- unless the player explicitly wakes them, which
@@ -35,37 +37,69 @@ export function ResidentChat({ person, onClose, onEnter }: { person: ResidentPos
     const greeting = person.action === 'sleeping'
       ? `(yawns, rubbing their eyes) Mmph... what is it? I was asleep.`
       : residentReply(person, 'hello', alreadyMet.current)
-    setMessages([{ role: 'assistant', content: greeting }])
+    // Only greet when there's no earlier conversation to pick up from, or
+    // when the player has just woken them (that's a new moment worth a line).
+    setMessages(old => old.length && person.action !== 'sleeping' ? old : [...old, { role: 'assistant', content: greeting }])
     return () => { serial.current++ }
   }, [asleep])
+  useEffect(() => { if (messages.length) useGameStore.getState().setResidentChat(person.resident.id, messages) }, [messages])
   useEffect(() => { end.current?.scrollIntoView({ block: 'nearest' }) }, [messages, busy])
   const groggy = person.action === 'sleeping' && woke
+  const isPinned = !!person.resident.outdoorActivities?.length
+  const inside = !person.visible
+  const options = isPinned ? chatActions(person) : []
+  const canAskEnter = isPinned && !inside && person.action !== 'home' && options.some(a => a.indoors)
+  const canAskExit = isPinned && inside && options.some(a => !a.indoors)
+  // Make a chosen activity real: override where they are / what they do,
+  // and take the player along when it crosses the door.
+  const apply = (a: Pick<ChatAction, 'indoors' | 'action' | 'label' | 'scene' | 'description'>) => {
+    const until = useGameStore.getState().simMinutesTotal + 90 + Math.floor(Math.random() * 90)
+    useGameStore.getState().setResidentOverride(person.resident.id, { indoors: a.indoors, action: a.action, activity: a.label, scene: a.scene, description: a.description, until })
+    const moved = { ...person, action: a.action, activity: a.label, scene: a.scene, description: a.description }
+    if (a.indoors && !inside) onEnter?.({ ...moved, x: person.resident.home.x, y: person.resident.home.y, visible: false })
+    else if (!a.indoors && inside) onExit?.({ ...moved, x: (person.resident.post ?? person.resident.home).x, y: (person.resident.post ?? person.resident.home).y, visible: true })
+  }
+  // A message that clearly asks for something on offer: a real yes/no.
+  const request = async (said: string, wanted: ChatAction[]) => {
+    const next = [...messages, { role: 'user' as const, content: said }].slice(-16), id = ++serial.current
+    setMessages(next); setDraft(''); setBusy(true); setNotice('')
+    // The model sees the player's words plus a short game note; the log keeps only the words.
+    const sent = [...next.slice(0, -1), { role: 'user' as const, content: said + actionRequestInstruction(person, wanted) }]
+    const pick = wanted[Math.floor(Math.random() * wanted.length)]
+    const fallback = Math.random() < 0.15 ? 'NO\nMaybe a little later.' : `YES\n${pick.indoors && inside === false ? 'Sure, come on in.' : !pick.indoors && inside ? 'Good idea, let’s step out.' : 'Alright, why not.'}`
+    const reply = await withTimeout(conversationReply(residentPrompt(person, groggy), sent, fallback), 20000, { text: fallback, notice: 'That took too long. Showing an offline reply.' })
+    if (id !== serial.current) return
+    const parsed = parseActionRequest(reply.text, reply.text === fallback ? [pick] : wanted)
+    setMessages([...next, { role: 'assistant', content: parsed.text }]); setNotice(reply.notice); setBusy(false)
+    if (parsed.granted && parsed.action) apply(parsed.action)
+  }
   const send = async (text: string) => {
     if (!text.trim() || busy) return
-    const next = [...messages, { role: 'user' as const, content: text.trim().slice(0, 1000) }].slice(-16), request = ++serial.current
+    const said = text.trim().slice(0, 1000)
+    const wanted = isPinned ? requestedActions(said, person) : undefined
+    if (wanted?.length) { void request(said, wanted); return }
+    const next = [...messages, { role: 'user' as const, content: said }].slice(-16), id = ++serial.current
     setMessages(next); setDraft(''); setBusy(true); setNotice('')
     const fallback = (groggy ? '(still half-asleep) ' : '') + residentReply(person, text, alreadyMet.current, groggy)
-    const reply = await withTimeout(conversationReply(residentPrompt(person, groggy), next, fallback), 20000, { text: fallback, notice: 'That took too long. Showing an offline reply.' })
-    if (request !== serial.current) return
-    setMessages([...next, { role: 'assistant', content: reply.text }]); setNotice(reply.notice); setBusy(false)
+    const system = residentPrompt(person, groggy) + (isPinned ? chatActionSuffix(person) : '')
+    const reply = await withTimeout(conversationReply(system, next, fallback), 20000, { text: fallback, notice: 'That took too long. Showing an offline reply.' })
+    if (id !== serial.current) return
+    const parsed = isPinned ? parseChatAction(reply.text, person) : { text: reply.text, action: undefined }
+    setMessages([...next, { role: 'assistant', content: parsed.text }]); setNotice(reply.notice); setBusy(false)
+    if (parsed.action) apply(parsed.action)
   }
-  const isPinned = !!person.resident.outdoorActivities?.length
-  const canAskEnter = isPinned && person.action !== 'home' && !!person.resident.indoorActivities?.length
   const decide = async (ask: 'next' | 'enter') => {
     if (busy) return
     const question = ask === 'enter' ? 'Can I come in?' : 'What will you do next?'
-    const next = [...messages, { role: 'user' as const, content: question }].slice(-16), request = ++serial.current
+    const next = [...messages, { role: 'user' as const, content: question }].slice(-16), id = ++serial.current
     setMessages(next); setBusy(true); setNotice('')
     const fallback = residentDecisionFallback(person, ask)
     const reply = await withTimeout(conversationReply(residentDecisionPrompt(person, ask), next, fallback), 20000, { text: fallback, notice: 'That took too long. Showing an offline reply.' })
-    if (request !== serial.current) return
+    if (id !== serial.current) return
     const decision = parseResidentDecision(reply.text, ask, person.resident, person)
-    const until = useGameStore.getState().simMinutesTotal + 90 + Math.floor(Math.random() * 90)
-    useGameStore.getState().setResidentOverride(person.resident.id, { indoors: decision.indoors, action: decision.action, activity: decision.activity, scene: decision.scene, description: decision.description, until })
     setMessages([...next, { role: 'assistant', content: decision.say }]); setNotice(reply.notice); setBusy(false)
-    if (ask === 'enter' && decision.granted && onEnter) {
-      onEnter({ ...person, action: decision.action ?? 'resting', activity: decision.activity ?? 'Indoors', scene: decision.scene, description: decision.description, x: person.resident.home.x, y: person.resident.home.y, visible: false })
-    }
+    if (ask === 'enter' && !decision.granted) return
+    apply({ indoors: decision.indoors, action: decision.action ?? (decision.indoors ? 'resting' : 'chatting'), label: decision.activity ?? (decision.indoors ? 'Indoors' : 'Out and about'), scene: decision.scene, description: decision.description })
   }
   if (asleep) {
     return <aside className="resident-chat" role="dialog" aria-label={`${person.resident.name} is asleep`} onKeyDown={e => { if (e.key === 'Escape') onClose() }}>
@@ -88,6 +122,7 @@ export function ResidentChat({ person, onClose, onEnter }: { person: ResidentPos
     {isPinned && <div className="conversation-topics">
       <button disabled={busy} onClick={() => void decide('next')}>What will you do next?</button>
       {canAskEnter && <button disabled={busy} onClick={() => void decide('enter')}>Can I come in?</button>}
+      {canAskExit && <button disabled={busy} onClick={() => void send('Shall we head outside?')}>Shall we head outside?</button>}
     </div>}
     <form onSubmit={e => { e.preventDefault(); void send(draft) }}><input autoFocus value={draft} maxLength={1000} onChange={e => setDraft(e.target.value)} placeholder="Say something…" aria-label="Message neighbour"/><button disabled={busy || !draft.trim()}>Send</button></form>
     <footer>{mode === 'ollama' ? 'Local conversation' : 'Offline conversation · Enable Ollama in Mira’s settings for open-ended chat'}</footer>

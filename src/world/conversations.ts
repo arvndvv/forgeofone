@@ -19,6 +19,150 @@ export function residentReply(person: ResidentPosition, question: string, metBef
   if (/hello|hi\b|hey|thanks/.test(q)) return `${metBefore ? 'Hello again' : 'Hello'}, neighbour! I’m ${r.name}. ${person.moving ? 'I have a few errands to run.' : person.activity + '.'} Ask me about my work or places around here.`
   return `I’m better at talking about ${r.interest}. You can ask what I’m doing, about my work, or about places nearby. For a more open-ended conversation, enable a local model in Mira’s settings.`
 }
+/** One thing a pinned resident can be talked into doing from chat: any
+ *  entry in their outdoorActivities or indoorActivities pool. Picking an
+ *  indoor option while they're outside means "go inside" (and the player
+ *  comes too); an outdoor option while inside means "head back out". So
+ *  adding an activity to a PINNED_RESIDENTS entry automatically makes it
+ *  reachable by chat -- no extra wiring per action. */
+export interface ChatAction { label: string; indoors: boolean; action: Activity; scene?: SceneKind; description?: string }
+
+export function chatActions(person: ResidentPosition): ChatAction[] {
+  const r = person.resident
+  const out = (r.outdoorActivities ?? []).map(a => ({ label: a.label, indoors: false, action: a.action }))
+  const ins = (r.indoorActivities ?? []).map(a => ({ label: a.label, indoors: true, action: a.action, scene: a.scene, description: a.description }))
+  // Everything except exactly what they're doing right now.
+  return [...out, ...ins].filter(a => !(a.label === person.activity && a.indoors === !person.visible))
+}
+
+/** Words that point at an action, beyond the words in its own label. */
+const ACTION_WORDS: Partial<Record<Activity, string[]>> = {
+  baking: ['bake', 'bread'], gardening: ['garden', 'plant', 'water', 'flower', 'weed'], selling: ['sell', 'stall', 'market'],
+  repairing: ['repair', 'fix', 'mend'], painting: ['paint', 'sketch', 'draw'], delivery: ['deliver', 'parcel'],
+  reading: ['read', 'book', 'paper', 'ledger'], resting: ['rest', 'relax', 'fire', 'sit down'], sleeping: ['sleep', 'nap', 'bed'],
+  cooking: ['cook', 'meal', 'dinner', 'lunch', 'breakfast', 'food'], playing: ['play', 'game'],
+}
+const STOP = new Set(['the', 'and', 'with', 'from', 'into', 'some', 'their', 'there', 'about', 'sitting', 'outside', 'inside', 'front', 'happy', 'small', 'going', 'through', 'asleep'])
+const REQUEST = /\b(can|could|would|will|shall|should|let's|lets|let us|how about|what about|why don't|why dont|why not|wanna|want to|please|maybe|go|come|time to|feel like|take a|have a|show me)\b/
+const GO_IN = /\b(come|go|step|head|get|walk|let me|let us|let's|lets|pop)\s+(on\s+|back\s+)?in\b|\b(come|go|step|head|get|walk|move|talk|chat|sit|let me|let's|lets|we|can i|may i|could i|mind if)\b[^.?!]{0,25}\b(inside|indoors)\b|\b(invite me in|your (home|house|place|cottage))\b/
+const GO_OUT = /\b(go|step|head|get|walk|move|talk|chat|sit|pop)\s+(back\s+)?(out|outside|outdoors)\b|\b(go|step|head|get|walk|move|talk|chat|sit|let's|lets|we|can we|shall we)\b[^.?!]{0,25}\b(outside|outdoors)\b|\b(fresh air|for a walk)\b/
+
+/** Which chatActions() a free-typed message is asking for, if any. Loose
+ *  on purpose -- it only routes the message to a real yes/no decision
+ *  (residentActionPrompt below); the resident still decides. Undefined
+ *  when the message isn't a request, so it stays plain conversation (and
+ *  a model can still act on it via chatActionSuffix/parseChatAction). */
+export function requestedActions(text: string, person: ResidentPosition): ChatAction[] | undefined {
+  const q = text.toLowerCase(), options = chatActions(person), inside = !person.visible
+  if (!options.length) return undefined
+  const labelWords = (a: ChatAction) => a.label.toLowerCase().split(/[^a-z]+/).filter(w => w.length > 4 && !STOP.has(w))
+  // Words from the option's own label ("ledgers") beat generic action words
+  // ("read"), so "show me the ledgers" doesn't also offer the porch paper.
+  const byLabel = options.filter(a => labelWords(a).some(w => q.includes(w)))
+  const named = byLabel.length ? byLabel : options.filter(a => (ACTION_WORDS[a.action] ?? []).some(w => q.includes(w)))
+  const wantsIn = !inside && GO_IN.test(q), wantsOut = inside && GO_OUT.test(q)
+  if (named.length && (REQUEST.test(q) || wantsIn || wantsOut)) {
+    // "let's go inside and read" -> only the indoor reading option, etc.;
+    // with no in/out wording, prefer staying where they are.
+    const here = named.filter(a => a.indoors === inside)
+    const side = wantsIn ? named.filter(a => a.indoors) : wantsOut ? named.filter(a => !a.indoors) : here.length ? here : named
+    if (side.length) return side
+  }
+  // Plain "let's go in / out": anything on the other side except sleeping,
+  // which you'd only want if you asked for it by name.
+  const awake = (a: ChatAction) => a.action !== 'sleeping'
+  if (wantsIn) { const ins = options.filter(a => a.indoors && awake(a)); return ins.length ? ins : undefined }
+  if (wantsOut) { const outs = options.filter(a => !a.indoors && awake(a)); return outs.length ? outs : undefined }
+  return undefined
+}
+
+const describe = (a: ChatAction, person: ResidentPosition) =>
+  `${a.label}${a.indoors !== !person.visible ? (a.indoors ? ' (go inside together)' : ' (head back outside together)') : ''}`
+
+/** Prompt for a message that IS a request (see requestedActions): agree
+ *  to one of `options` or decline, in character. Same KEY: value shape as
+ *  residentDecisionPrompt so one parser handles model and fallback. */
+export function residentActionPrompt(person: ResidentPosition, options: ChatAction[]): string {
+  const r = person.resident
+  const backstory = r.backstory ? ` Background: ${r.backstory}` : ''
+  return `You are ${r.name}, a friendly ${r.role} in the offline life-simulation game Forge of One.${backstory} You are ${person.visible ? 'outside' : 'inside your home'}: ${person.activity}. The player's latest message asks you to do something. Decide, in character, whether you agree -- usually yes, unless declining genuinely fits you right now. Options, copy one exactly: ${options.map(a => describe(a, person)).join('; ')}. Reply on separate lines, exactly: "ACTION: <chosen option>" or "ACTION: none", then "SAY: <one or two short in-character sentences replying to the player>". No other text.`
+}
+
+export function residentActionFallback(options: ChatAction[]): string {
+  if (!options.length || Math.random() < 0.15) return 'ACTION: none\nSAY: Maybe a little later.'
+  const pick = options[Math.floor(Math.random() * options.length)]
+  return `ACTION: ${pick.label}\nSAY: ${pick.indoors ? 'Sure, ' : 'Alright, '}why not.`
+}
+
+/** Instruction appended to the player's own message (only in what's sent
+ *  to the model, never shown) when requestedActions() says it's a request.
+ *  Small local models ignore format rules in the system prompt once a chat
+ *  has some history, but reliably follow one in the latest user turn -- and
+ *  a bare YES/NO first line is the one format they get right. Which option
+ *  they end up doing is picked in code (parseActionRequest), not by them. */
+export function actionRequestInstruction(person: ResidentPosition, wanted: ChatAction[]): string {
+  const inside = !person.visible
+  const crossing = wanted.every(a => a.indoors !== inside)
+  const what = crossing
+    ? (inside ? 'to head back outside together with them' : 'to go inside your home together with them')
+    : `for you to switch to: ${wanted.map(a => a.label).join(' / ')}`
+  return `\n\n(Game note, not spoken by the player: you are currently ${inside ? 'INSIDE your home' : 'OUTSIDE'}. The player is asking ${what}. Decide in character. Your first line must be exactly YES or NO. Then one or two short in-character sentences that match that decision${crossing ? (inside ? ' -- if YES, you are heading out the door now' : ' -- if YES, you are leading them in now') : ''}.)`
+}
+
+const AGREE = /\b(yes|yeah|sure|of course|certainly|absolutely|alright|all right|okay|ok|gladly|why not|come on in|let's go|lets go|follow me|after you|right this way|with pleasure|i'd love|i would love|good idea|sounds good|happy to)\b/i
+const DECLINE = /\b(no|nope|not now|not right now|not today|another time|maybe later|rather not|i'd rather|i would rather|can't|cannot|won't|sorry)\b/i
+
+/** Reads a reply to actionRequestInstruction(): YES/NO from the first line,
+ *  or, when the model skipped it, a best guess from the prose itself.
+ *  Picks which of `wanted` to do -- the one the reply mentions most, else
+ *  the first -- so the model never has to copy a label exactly. */
+export function parseActionRequest(text: string, wanted: ChatAction[]): { granted: boolean; action?: ChatAction; text: string } {
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
+  const head = (lines[0] ?? '').replace(/[*_"'`.!:]/g, '').trim().toLowerCase()
+  let granted: boolean | undefined
+  let body = lines
+  if (/^(yes|no)\b/.test(head)) {
+    granted = head.startsWith('yes')
+    const rest = lines[0].replace(/^[*_"'`\s]*(yes|no)[*_"'`.!:,\s-]*/i, '').trim()
+    body = rest ? [rest, ...lines.slice(1)] : lines.slice(1)
+  }
+  const shown = body.filter(l => !/^\s*\**\s*(ACTION|SAY|DOING)\s*\**\s*:\s*$/i.test(l)).map(l => l.replace(/^\s*\**\s*(SAY|ACTION|DOING)\s*\**\s*:\s*/i, '')).join('\n').trim()
+  if (granted === undefined) {
+    const agrees = AGREE.test(shown), declines = DECLINE.test(shown)
+    granted = agrees || !declines
+  }
+  if (!granted) return { granted: false, text: shown || 'Maybe a little later.' }
+  const lower = shown.toLowerCase()
+  const score = (a: ChatAction) => a.label.toLowerCase().split(/[^a-z]+/).filter(w => w.length > 3 && lower.includes(w)).length
+  const action = [...wanted].sort((a, b) => score(b) - score(a))[0]
+  return { granted: true, action, text: shown || 'Alright.' }
+}
+
+/** Extra instructions for an ordinary chat reply, so a model can also act
+ *  on requests requestedActions() didn't catch, or suggest something on
+ *  its own. Read back by parseChatAction(). */
+export function chatActionSuffix(person: ResidentPosition): string {
+  const options = chatActions(person)
+  if (!options.length) return ''
+  return ` You can also actually do things. If the player asks or suggests one of these and you agree, or you decide to do one yourself, say so and add a final line exactly "ACTION: <option copied exactly>". Options: ${options.map(a => describe(a, person)).join('; ')}. Otherwise add no ACTION line.`
+}
+
+/** Strips an ACTION line (and any stray SAY: prefix) off a reply and
+ *  resolves it against chatActions(). `action` is undefined for "none",
+ *  no tag, or a tag naming nothing on offer. */
+export function parseChatAction(text: string, person: ResidentPosition): { text: string; action?: ChatAction } {
+  const lines = text.split('\n')
+  const isTag = (l: string, key: string) => new RegExp(`^\\s*\\**\\s*${key}\\s*\\**\\s*:`, 'i').test(l)
+  const tag = lines.find(l => isTag(l, 'ACTION'))
+  const shown = lines.filter(l => !isTag(l, 'ACTION')).map(l => isTag(l, 'SAY') ? l.replace(/^[^:]*:/, '').trim() : l).join('\n').trim()
+  const wanted = tag?.replace(/^[^:]*:/, '').replace(/\*/g, '').replace(/\((go inside|head back outside) together\)/i, '').trim().toLowerCase()
+  if (!wanted || wanted === 'none' || wanted.startsWith('no')) return { text: shown || text.trim() }
+  const options = chatActions(person)
+  const action = options.find(a => a.label.toLowerCase() === wanted)
+    ?? options.find(a => wanted.includes(a.label.toLowerCase()) || a.label.toLowerCase().includes(wanted))
+  return { text: shown || text.trim(), action }
+}
+
 export function residentPrompt(person: ResidentPosition, groggy = false) {
   const r = person.resident
   const backstory = r.backstory ? ` Background: ${r.backstory}` : ''
@@ -44,7 +188,7 @@ export function residentDecisionPrompt(person: ResidentPosition, ask: 'next' | '
   const backstory = r.backstory ? ` Background: ${r.backstory}` : ''
   if (ask === 'enter') {
     const options = r.indoorActivities?.map(a => a.label).join('; ') || 'resting at home'
-    return `You are ${r.name}, a friendly ${r.role} in the offline life-simulation game Forge of One.${backstory} The player, standing at your door, just asked if they can come inside. Right now you are: ${person.activity}. Decide yes or no, in character -- usually yes, unless declining fits your personality better right now. Reply on separate lines, exactly: "ENTER: yes" or "ENTER: no"; if yes, also "DOING: <one item from this list, copied exactly: ${options}>"; and always "SAY: <one short in-character sentence>". No other text.`
+    return `You are ${r.name}, a friendly ${r.role} in the offline life-simulation game Forge of One.${backstory} The player, standing at your door, wants to come inside (see their latest message, in context of your conversation so far). Right now you are: ${person.activity}. Decide yes or no, in character -- usually yes, unless declining fits your personality better right now. Reply on separate lines, exactly: "ENTER: yes" or "ENTER: no"; if yes, also "DOING: <one item from this list, copied exactly: ${options}>"; and always "SAY: <one short in-character sentence>". No other text.`
   }
   const indoors = !person.visible
   const pool = (indoors ? r.indoorActivities?.map(a => a.label) : r.outdoorActivities?.map(a => a.label)) ?? []

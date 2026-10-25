@@ -60,6 +60,10 @@ export function WorldView({ onNavigate }: { onNavigate: (screen: WorldScreen) =>
   const overlayWatcher = useRef<(() => void) | null>(null)
   const wasOverlay = overlay.current
   overlay.current = !!talking || journal || areaInfo || !!home || !!shop; selection.current = selected
+  // With only the chat open the map is still visible around it, so it keeps
+  // being redrawn (at the slow overlay rate, see tickOverlay) -- otherwise a
+  // resident who steps outside mid-chat stays invisible until it closes.
+  const mapShowing = useRef(false); mapShowing.current = !!talking && !journal && !areaInfo && !home && !shop
   homeState.current = home; talkingState.current = talking
   if (wasOverlay !== overlay.current) overlayWatcher.current?.()
   const livePeople = useRef<ResidentPosition[]>([])
@@ -116,15 +120,9 @@ export function WorldView({ onNavigate }: { onNavigate: (screen: WorldScreen) =>
         const state = useGameStore.getState()
         setTalking(old => old ? residentPosition(old.resident, state.simMinutesTotal, state.residentOverrides[old.resident.id]) : old)
         setHome(old => old ? residentPosition(old.resident, state.simMinutesTotal, state.residentOverrides[old.resident.id]) : old)
+        if (mapShowing.current) draw(performance.now())
       }
-      const loop = (now: number) => {
-        // The world canvas is fully hidden behind HomeInterior/ResidentChat/
-        // the journal/area-info panels while one is open. Rather than just
-        // skipping the redraw, stop scheduling this loop entirely -- no rAF
-        // callback at all -- and hand off to a slow plain interval instead, so
-        // there is truly nothing per-frame running for a canvas nobody can
-        // see. onOverlayChange() below restarts this loop once it closes.
-        if (overlay.current) { frame = 0; if (!overlayTimer) overlayTimer = window.setInterval(tickOverlay, 200); return }
+      const draw = (now: number) => {
         try {
           const state = useGameStore.getState()
           if (state.simMinutesTotal !== lastMinute || state.running !== wasRunning) {
@@ -144,6 +142,16 @@ export function WorldView({ onNavigate }: { onNavigate: (screen: WorldScreen) =>
           // log it and keep the loop (and the app) alive.
           console.error('World render failed:', e)
         }
+      }
+      const loop = (now: number) => {
+        // The world canvas is fully hidden behind HomeInterior/ResidentChat/
+        // the journal/area-info panels while one is open. Rather than just
+        // skipping the redraw, stop scheduling this loop entirely -- no rAF
+        // callback at all -- and hand off to a slow plain interval instead, so
+        // there is truly nothing per-frame running for a canvas nobody can
+        // see. onOverlayChange() below restarts this loop once it closes.
+        if (overlay.current) { frame = 0; if (!overlayTimer) overlayTimer = window.setInterval(tickOverlay, 200); return }
+        draw(now)
         frame = requestAnimationFrame(loop)
       }
       // Whenever an overlay opens or closes, flip which of the two (rAF loop
@@ -260,7 +268,7 @@ export function WorldView({ onNavigate }: { onNavigate: (screen: WorldScreen) =>
         : interaction && <div className="world-interaction" aria-live="polite"><small>{interaction.poi.screen || interaction.poi.shop ? 'COME ON IN' : discovered ? 'DISCOVERED' : 'A PLACE TO EXPLORE'}</small><strong>{interaction.poi.label}</strong>{discovered ? <p>{interaction.poi.item ? `${interaction.poi.item.name} is in your journal.` : interaction.poi.flavor}</p> : <button className="world-enter" onClick={interact}>{interaction.poi.screen || interaction.poi.shop ? 'Enter' : interaction.poi.item ? 'Explore & collect' : 'Look around'} <kbd>E</kbd></button>}</div>)}
       {home && <HomeInterior key={`home:${home.resident.id}`} person={home} crowded={!!talking} onClose={() => { setHome(null); setTalking(null); canvas.current?.focus({ preventScroll: true }) }} onTalk={() => talkTo(home)} />}
       {shop && <ShopInterior key={`shop:${shop.label}`} kind={shop.type} label={shop.label} onClose={() => { setShop(null); canvas.current?.focus({ preventScroll: true }) }} />}
-      {talking && <ResidentChat key={`chat:${talking.resident.id}`} person={talking} onClose={() => { setTalking(null); canvas.current?.focus({ preventScroll: true }) }} onEnter={position => { setTalking(null); setHome(position) }} />}
+      {talking && <ResidentChat key={`chat:${talking.resident.id}`} person={talking} onClose={() => { setTalking(null); canvas.current?.focus({ preventScroll: true }) }} onEnter={position => { setHome(position); setTalking(position) }} onExit={position => { setHome(null); setTalking(position) }} />}
       {areaInfo && <aside className="world-area-info" id="world-area-info" role="dialog" aria-label="Around you" onKeyDown={e => { if (e.key === 'Escape') { setAreaInfo(false); canvas.current?.focus({ preventScroll: true }) } }}>
         <header><strong>Around you</strong><button autoFocus aria-label="Close area information" onClick={() => { setAreaInfo(false); canvas.current?.focus({ preventScroll: true }) }}>×</button></header>
         <div className="world-notes">
