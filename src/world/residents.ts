@@ -1,4 +1,4 @@
-import { hashCoord, getSettlement, getTile, listWorldTowns, type Point, type Settlement } from './generation'
+import { hashCoord, getSettlement, getTile, listWorldTowns, findLandmark, type Point, type Settlement } from './generation'
 import { findPath } from './pathfinding'
 import { facingForStep, type Facing } from './facing'
 import type { Applicant, Employee, DynamicExpert, SkillDomain } from '../types/game'
@@ -25,12 +25,30 @@ interface Stop { point: Point; activity: string; action: Activity; duration: num
  *  come in?" in ResidentChat.tsx, stored in gameStore.residentOverrides,
  *  and consumed by pinnedResidentPosition() below. Not persisted to disk
  *  (the game has no save/load), so it's safe to keep purely in memory. */
-export interface ResidentOverride { indoors: boolean; action?: Activity; activity?: string; scene?: SceneKind; description?: string; until: number }
+export interface ResidentOverride {
+  indoors: boolean; action?: Activity; activity?: string; scene?: SceneKind; description?: string; until: number
+  /** Which of their places this is at -- 'home' (default) or 'work'. */
+  at?: Place
+  /** Walking there first: a tile path to follow in real time (Date.now()),
+   *  one tile per `msPerTile` -- the same pace as the player, so the two
+   *  can walk together. Once it's done they're simply at the destination. */
+  journey?: { path: Point[]; startedAt: number; msPerTile: number; to: string }
+}
+/** A pinned resident's two possible places: their home landmark, or their work landmark. */
+export type Place = 'home' | 'work'
 export interface Resident {
   id: string; name: string; role: string; town: string; workplace: string; interest: string; sprite: number
   home: Point; stops: Stop[]; duration: number; shift: number; lane: number; backstory?: string
   /** How they talk and behave -- see PinnedResident.personality. */
   personality?: string
+  /** Pinned residents: the landmark building they live in (PinnedResident.home),
+   *  so conversation can name it and describe it rather than "their house". */
+  place?: { id: string; label: string; description?: string }
+  /** Pinned residents with a `work` landmark: that building, its door and
+   *  the spot by it where they stand (like `post` for home). */
+  workPlace?: { id: string; label: string; description?: string; door: Point; post: Point }
+  workActivities?: Array<{ action: Activity; label: string; description?: string }>
+  workShare?: number
   /** Chat portrait shown top-left of their chat box (see ResidentPortrait.tsx).
    *  Import a transparent-background PNG and pass its path; left unset, the
    *  chat falls back to a code-drawn portrait using `sprite`'s outfit. */
@@ -69,7 +87,7 @@ export interface Resident {
   indoorShare?: number
   bucketMinutes?: number
 }
-export interface ResidentPosition extends Point { resident: Resident; moving: boolean; facing: Facing; activity: string; action: Activity; visible: boolean; scene?: SceneKind; description?: string }
+export interface ResidentPosition extends Point { resident: Resident; moving: boolean; facing: Facing; activity: string; action: Activity; visible: boolean; scene?: SceneKind; description?: string; at?: Place }
 const NAMES = ['Asha', 'Devon', 'Priya', 'Sam', 'Ravi', 'Elena', 'Tomas', 'Nisha', 'Marcus', 'Kavya', 'Mina', 'Arun', 'Isha', 'Leo', 'Noor', 'Kiran', 'Maya', 'Jules', 'Tara', 'Owen', 'Amir', 'Zoya', 'Remy', 'Anika']
 const ROLES = ['Baker', 'Gardener', 'Shopkeeper', 'Carpenter', 'Designer', 'Courier', 'Teacher', 'Bookseller']
 const JOBS: Array<{ action: Activity; description: string; interest: string }> = [
@@ -113,12 +131,24 @@ export interface PinnedResident {
   /** Which skill-coaching domains this character is the named expert for
    *  -- see the matching field on Resident above for how it's used. */
   expertise?: SkillDomain[]
-  /** Which building slot in the town's 4x4 grid they're based at (0-3, 0-3).
-   *  Usually a matching TOWN_LANDMARKS entry (generation.ts) so the
-   *  building itself has a custom name too, but any generated home or shop
-   *  slot works -- look up the town's `buildings` to see what's there. */
-  col: number
-  row: number
+  /** The `id` of the TOWN_LANDMARKS entry (generation.ts) they live in --
+   *  e.g. 'test-house'. That one link decides their town, their building,
+   *  where they stand outside (by its door), the room you see inside, and
+   *  the name/description conversation uses for the place. Add the
+   *  landmark first, then point at it here. An unknown id logs a warning
+   *  in dev and the character simply doesn't appear. */
+  home: string
+  /** Optional: the `id` of a second TOWN_LANDMARKS entry, in the SAME town,
+   *  where they work. They spend some of their time there (workShare),
+   *  standing by its door doing one of workActivities, and can be asked in
+   *  chat to walk there -- or back home -- with the player. */
+  work?: string
+  /** Things they do at work, same shape as outdoorActivities (shown by the
+   *  work building's door). Needed for `work` to have any effect. */
+  workActivities?: Array<{ action: Activity; label: string; description?: string }>
+  /** Rough fraction of the time (0-1) they're at work when the ambient
+   *  routine re-rolls. Default 0.4 when `work` is set. */
+  workShare?: number
   /** Outfit index, reused from the existing 8 neighbour looks (0-7). Still
    *  used for the default chat portrait fallback even when `sprites` or
    *  `portrait` below are set, so it's never wasted to leave it accurate. */
@@ -157,15 +187,24 @@ export interface PinnedResident {
   sprites?: Partial<Record<Activity, string>> & { default?: string }
 }
 
-/** Keyed by region id "rx,ry" (Founders Green, the start town, is "0,0") --
- *  the same key TOWN_LANDMARKS uses in generation.ts. Empty by default. */
-export const PINNED_RESIDENTS: Record<string, PinnedResident[]> = {
-  '1,0': [{
+/** Every hand-authored character. Each one's `home` is a TOWN_LANDMARKS id
+ *  (generation.ts), which places them -- no town key or grid slot here. */
+export const PINNED_RESIDENTS: PinnedResident[] = [
+  {
     id: 'elder-tam', name: 'Tam', role: 'Retired shopkeeper', interest: 'old trade routes and giving advice',
-    backstory: 'Ran the first general store in Founders Green for thirty years before handing it down.',
+    // Keep backstories town-neutral or about their own town -- the town's
+    // name comes from the world seed, and a different town name here
+    // confuses small models about where they live.
+    backstory: 'Ran the town’s first general store for thirty years before handing it down.',
     personality: 'Warm, unhurried and a little nostalgic. Calls people "friend", loves telling stories about the old trade routes, and gently teases young folk who rush. Enjoys company and rarely turns a visitor away. Speaks plainly, with the odd shopkeeper saying.',
     expertise: ['negotiation', 'personal-finance'],
-    col: 0, row: 0, sprite: 9,
+    home: 'test-house', sprite: 9,
+    // Retired, but still minds the town's old records a few days a week.
+    work: 'old-trade-post', workShare: 0.3,
+    workActivities: [
+      { action: 'reading', label: 'Sorting old trade records', description: 'Tam sits at the long counter of the Old Trade Post, sorting yellowed shipping records into labelled crates.' },
+      { action: 'chatting', label: 'Telling visitors about the old routes', description: 'Tam leans on the Trade Post counter, telling anyone who drops in about the caravans that used to pass through.' },
+    ],
     // label: short, shown in the UI. description: what it actually is --
     // the local model reads it to understand the option (and to describe
     // it when it happens), so a sentence of concrete detail helps.
@@ -181,13 +220,31 @@ export const PINNED_RESIDENTS: Record<string, PinnedResident[]> = {
     ],
     indoorShare: 0.4, changeMinutes: [90, 240],
     portrait: tamPortrait, sprites: { chatting: tamPortrait, reading: tamPortrait, gardening: tamPortrait, resting: tamPortrait, sleeping: tamPortrait, default: tamPortrait },
-  }],
+  },
+]
+
+const warned = new Set<string>()
+/** Resolves a pinned resident's optional `work` landmark into Resident fields. */
+function workFor(pinned: PinnedResident, town: Settlement, seed: number): Partial<Resident> {
+  if (!pinned.work) return {}
+  const found = findLandmark(pinned.work)
+  if (!found) { warnOnce(`[world] ${pinned.name}: work "${pinned.work}" is not a TOWN_LANDMARKS id.`); return {} }
+  if (found.townKey !== town.id) { warnOnce(`[world] ${pinned.name}: work "${pinned.work}" must be in the same town as their home.`); return {} }
+  const b = town.buildings.find(x => x.landmarkId === pinned.work)
+  if (!b) { warnOnce(`[world] ${pinned.name}: work landmark "${pinned.work}" wasn't built in this town.`); return {} }
+  if (!pinned.workActivities?.length) warnOnce(`[world] ${pinned.name}: has work "${pinned.work}" but no workActivities, so they never go there.`)
+  return {
+    workplace: b.label,
+    workPlace: { id: pinned.work, label: b.label, description: b.description, door: b.door, post: openSpot({ x: b.door.x, y: b.door.y + 1 }, seed) },
+    workActivities: pinned.workActivities, workShare: pinned.workShare,
+  }
 }
+const warnOnce = (message: string) => { if (import.meta.env?.DEV && !warned.has(message)) { warned.add(message); console.warn(message) } }
 
 /** All pinned residents across every town, flattened -- used by
  *  expertFor() below. Small and static, so no caching needed. */
 function allPinnedResidents(): PinnedResident[] {
-  return Object.values(PINNED_RESIDENTS).flat()
+  return PINNED_RESIDENTS
 }
 
 /** The named pinned resident (if any) tagged as the expert for a given
@@ -439,9 +496,12 @@ export function getResidents(town: Settlement, seed: number): Resident[] {
       ],
     })
   }
-  for (const pinned of PINNED_RESIDENTS[town.id] ?? []) {
-    const building = town.buildings.find(b => b.id === `${town.id}:${pinned.col},${pinned.row}`)
-    if (!building) continue
+  for (const pinned of PINNED_RESIDENTS) {
+    const found = findLandmark(pinned.home)
+    if (!found) { warnOnce(`[world] ${pinned.name} (${pinned.id}): home "${pinned.home}" is not a TOWN_LANDMARKS id.`); continue }
+    if (found.townKey !== town.id) continue
+    const building = town.buildings.find(b => b.landmarkId === pinned.home)
+    if (!building) { warnOnce(`[world] ${pinned.name}: landmark "${pinned.home}" wasn't built -- its slot may be skipped in this town's biome (woodland/highlands skip row 0, cols 1-2).`); continue }
     const post = openSpot({ x: building.door.x, y: building.door.y + 1 }, seed)
     const idSeed = strseed(pinned.id)
     const [minC, maxC] = pinned.changeMinutes ?? [90, 240]
@@ -451,6 +511,8 @@ export function getResidents(town: Settlement, seed: number): Resident[] {
       workplace: building.label, interest: pinned.interest, backstory: pinned.backstory, personality: pinned.personality, sprite: pinned.sprite,
       expertise: pinned.expertise,
       portrait: pinned.portrait, sprites: pinned.sprites, homeBuildingId: building.id,
+      place: { id: pinned.home, label: building.label, description: building.description },
+      ...workFor(pinned, town, seed),
       post, outdoorActivities: pinned.outdoorActivities, indoorActivities: pinned.indoorActivities,
       indoorShare: pinned.indoorShare, bucketMinutes,
       home: building.door, lane: 0, shift: 0, duration: 1440, stops: [],
@@ -469,17 +531,20 @@ export function getResidents(town: Settlement, seed: number): Resident[] {
  *  the same simMinutes always re-derives the same answer, which is what
  *  keeps revisiting/remounting side-effect-free for everyone except the
  *  explicit override escape hatch below. */
-function ambientPinnedState(resident: Resident, simMinutes: number): { indoors: boolean; index: number } {
+function ambientPinnedState(resident: Resident, simMinutes: number): { indoors: boolean; at: Place; index: number } {
   const bucketMinutes = resident.bucketMinutes ?? 180
   const bucket = Math.floor(Math.max(0, simMinutes) / bucketMinutes)
   const idSeed = strseed(resident.id)
   const hasIndoor = !!resident.indoorActivities?.length
   const indoorShare = hasIndoor ? resident.indoorShare ?? 0.35 : 0
-  const indoors = hashCoord(bucket, idSeed, 11) < indoorShare
-  const pool = indoors ? resident.indoorActivities : resident.outdoorActivities
+  const workShare = resident.workPlace && resident.workActivities?.length ? resident.workShare ?? 0.4 : 0
+  const roll = hashCoord(bucket, idSeed, 11)
+  const indoors = roll < indoorShare
+  const at: Place = !indoors && roll < indoorShare + workShare ? 'work' : 'home'
+  const pool = indoors ? resident.indoorActivities : at === 'work' ? resident.workActivities : resident.outdoorActivities
   const poolLen = Math.max(1, pool?.length ?? 1)
   const index = Math.min(poolLen - 1, Math.floor(hashCoord(bucket, idSeed, 29) * poolLen))
-  return { indoors, index }
+  return { indoors, at, index }
 }
 
 /** Position for a pinned resident with outdoorActivities set -- a separate
@@ -495,26 +560,36 @@ function pinnedResidentPosition(resident: Resident, simMinutes: number, override
   // no bearing on the sprite. `visible` (not `action`) is what says
   // whether they're on the map, so an indoor action is never forced to a
   // sentinel value the way it is for the Stop-based residents below.
-  let indoors: boolean, action: Activity, activity: string, scene: SceneKind | undefined, description: string | undefined
+  let indoors: boolean, at: Place, action: Activity, activity: string, scene: SceneKind | undefined, description: string | undefined
   if (override && simMinutes < override.until) {
+    // On the way somewhere (asked in chat): walk the path in real time.
+    const j = override.journey
+    if (j && j.path.length > 1) {
+      const t = (Date.now() - j.startedAt) / j.msPerTile
+      if (t < j.path.length - 1) {
+        const i = Math.max(0, Math.floor(t)), f = Math.max(0, t - i), a = j.path[i], b = j.path[i + 1]
+        return { resident, x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f, facing: facingForStep(b.x - a.x, b.y - a.y), moving: true, action: 'walking', activity: `Walking to ${j.to}`, visible: true, at: override.at ?? 'home' }
+      }
+    }
     indoors = override.indoors
+    at = override.at ?? 'home'
     action = override.action ?? (indoors ? 'resting' : 'chatting')
     activity = override.activity ?? (indoors ? 'Indoors' : 'Out and about')
     scene = override.scene
     description = override.description
   } else {
     const state = ambientPinnedState(resident, simMinutes)
-    indoors = state.indoors
+    indoors = state.indoors; at = state.at
     if (indoors) {
       const a = resident.indoorActivities?.[state.index]
       action = a?.action ?? 'resting'; activity = a?.label ?? 'At home'; scene = a?.scene; description = a?.description
     } else {
-      const a = resident.outdoorActivities?.[state.index]
+      const a = (at === 'work' ? resident.workActivities : resident.outdoorActivities)?.[state.index]
       action = a?.action ?? 'chatting'; activity = a?.label ?? 'Out and about'; scene = undefined; description = undefined
     }
   }
-  const point = indoors ? resident.home : (resident.post ?? resident.home)
-  return { resident, x: point.x + (indoors ? 0 : resident.lane), y: point.y, facing: 'south', moving: false, action, activity, visible: !indoors, scene, description }
+  const point = indoors ? resident.home : at === 'work' && resident.workPlace ? resident.workPlace.post : (resident.post ?? resident.home)
+  return { resident, x: point.x + (indoors ? 0 : resident.lane), y: point.y, facing: 'south', moving: false, action, activity, visible: !indoors, scene, description, at }
 }
 
 /** Position is derived from the simulation clock, so revisiting/remounting a

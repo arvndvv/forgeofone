@@ -32,11 +32,11 @@ export const useLocalAI = create<LocalAIState>((set, get) => ({
   },
 }))
 
-export async function conversationReply(system: string, messages: Message[], fallback: string): Promise<{ text: string; notice: string }> {
+export async function conversationReply(system: string, messages: Message[], fallback: string, opts: { maxTokens?: number; temperature?: number } = {}): Promise<{ text: string; notice: string }> {
   const config = useLocalAI.getState()
   if (config.mode !== 'ollama') return { text: fallback, notice: '' }
   try {
-    const result = await ollamaChat({ model: config.model, messages: [{ role: 'system', content: system.slice(0, 6500) }, ...messages.slice(-10).map(m => ({ ...m, content: m.content.slice(0, 1500) }))] })
+    const result = await ollamaChat({ model: config.model, messages: [{ role: 'system', content: system.slice(0, 6500) }, ...messages.slice(-10).map(m => ({ ...m, content: m.content.slice(0, 1500) }))], maxTokens: opts.maxTokens, temperature: opts.temperature })
     return result.ok && result.text ? { text: result.text, notice: '' } : { text: fallback, notice: `${result.error || 'Local chat is unavailable.'} Showing an offline reply.` }
   } catch { return { text: fallback, notice: 'Local chat is unavailable. Showing an offline reply.' } }
 }

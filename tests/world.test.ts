@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
-import { clearWorldCaches, getTile, getSettlement, getSites, hashCoord, worldCacheSizes, getInteraction } from '../src/world/generation'
+import { clearWorldCaches, getTile, getSettlement, findLandmark, TOWN_LANDMARKS, getSites, hashCoord, worldCacheSizes, getInteraction } from '../src/world/generation'
 import { findPath } from '../src/world/pathfinding'
-import { getResidents, residentPosition } from '../src/world/residents'
+import { getResidents, residentPosition, PINNED_RESIDENTS } from '../src/world/residents'
 import { useGameStore } from '../src/store/gameStore'
 import { getAnimals, animalPosition } from '../src/world/wildlife'
 import { regionBiome, grassColor } from '../src/world/regions'
-import { residentReply } from '../src/world/conversations'
+import { residentReply, chatActions, moveFor } from '../src/world/conversations'
 import { nearbyResident, worldInteraction } from '../src/world/interactions'
 import type { ResidentPosition } from '../src/world/residents'
 
@@ -223,6 +223,47 @@ check('artifacts collect once per site and reset clears inventory and contacts',
   s.getState().meetResident('test', 'Neighbour', 'Baker'); assert.equal(s.getState().contacts.test.meetings, 1)
   s.getState().resetGame()
   assert.deepEqual(s.getState().inventory, []); assert.deepEqual(s.getState().contacts, {})
+})
+
+check('pinned residents link to their home and work landmarks by id, and can walk between them', () => {
+  const ids = Object.values(TOWN_LANDMARKS).flat().map(l => l.id)
+  assert.equal(new Set(ids).size, ids.length, 'landmark ids are unique')
+  for (const pinned of PINNED_RESIDENTS) {
+    const home = findLandmark(pinned.home)
+    assert.ok(home, `${pinned.name}: home "${pinned.home}" exists`)
+    if (pinned.work) assert.equal(findLandmark(pinned.work)?.townKey, home!.townKey, `${pinned.name}: work is in the home town`)
+    const [rx, ry] = home!.townKey.split(',').map(Number)
+    for (const seed of [0, 1, 9173, 452199]) {
+      const town = getSettlement(rx, ry, seed)
+      const r = getResidents(town, seed).find(x => x.id.endsWith(`:pinned:${pinned.id}`))
+      assert.ok(r, `${pinned.name} appears in ${town.name} (seed ${seed})`)
+      const homeBuilding = town.buildings.find(b => b.landmarkId === pinned.home)!
+      assert.equal(r!.homeBuildingId, homeBuilding.id)
+      assert.equal(r!.place?.label, homeBuilding.label)
+      if (!pinned.work) continue
+      const work = r!.workPlace!
+      assert.equal(work.label, town.buildings.find(b => b.landmarkId === pinned.work)!.label)
+      for (const p of [r!.post!, work.post, work.door, r!.home]) assert.ok(getTile(p.x, p.y, seed).walkable, `walkable ${p.x},${p.y}`)
+      const path = findPath(r!.post!, work.post, seed)
+      assert.ok(path.length > 1, `${pinned.name} can walk home -> work (seed ${seed})`)
+      assert.ok(findPath(work.post, r!.home, seed).length > 1, 'and back to the front door')
+      // At home outside: work options are a walk, indoor ones a door move.
+      const outside = residentPosition(r!, 0, { indoors: false, at: 'home', action: 'chatting', activity: 'x', until: 1e9 })
+      const options = chatActions(outside)
+      assert.ok(options.some(o => o.at === 'work' && moveFor(o, outside) === 'walk'))
+      assert.ok(options.filter(o => o.indoors).every(o => moveFor(o, outside) === 'in'))
+      // On the way: moving along the path; afterwards: standing at work.
+      const journey = { path, startedAt: Date.now() - 160 * 1.5, msPerTile: 160, to: work.label }
+      const walking = residentPosition(r!, 0, { indoors: false, at: 'work', action: 'reading', activity: 'Sorting', until: 1e9, journey })
+      assert.ok(walking.moving && walking.visible && walking.action === 'walking')
+      assert.ok(Math.abs(walking.x - path[1].x) + Math.abs(walking.y - path[1].y) <= 1)
+      const arrived = residentPosition(r!, 0, { indoors: false, at: 'work', action: 'reading', activity: 'Sorting', until: 1e9, journey: { ...journey, startedAt: Date.now() - 160 * (path.length + 1) } })
+      assert.deepEqual({ x: arrived.x, y: arrived.y, at: arrived.at, moving: arrived.moving }, { x: work.post.x, y: work.post.y, at: 'work', moving: false })
+      // Ambient routine: sometimes at work, at the work post.
+      const atWork = Array.from({ length: 200 }, (_, i) => residentPosition(r!, i * 240)).filter(p => p.at === 'work')
+      assert.ok(atWork.length > 0 && atWork.every(p => p.x === work.post.x && p.y === work.post.y && p.visible))
+    }
+  }
 })
 
 console.log(`${checks} world checks passed.`)

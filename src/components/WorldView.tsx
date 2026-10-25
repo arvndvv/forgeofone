@@ -7,7 +7,7 @@ import { residentPosition, residentForBuilding, type ResidentPosition, type Resi
 import type { AnimalPosition } from '../world/wildlife'
 import { BIOMES, biomeAt } from '../world/regions'
 import { worldInteraction } from '../world/interactions'
-import { ResidentChat } from './ResidentChat'
+import { ResidentChat, type Travel } from './ResidentChat'
 import { CollectionJournal } from './CollectionJournal'
 import { HomeInterior } from './HomeInterior'
 import { ShopInterior } from './ShopInterior'
@@ -52,6 +52,10 @@ export function WorldView({ onNavigate }: { onNavigate: (screen: WorldScreen) =>
   const [selected, setSelected] = useState<ResidentPosition | null>(null)
   const [talking, setTalking] = useState<ResidentPosition | null>(null), [journal, setJournal] = useState(false), [animal, setAnimal] = useState<AnimalPosition | null>(null)
   const [home, setHome] = useState<ResidentPosition | null>(null)
+  // Walking somewhere with the resident you're talking to (asked in chat).
+  // The chat stays mounted but hidden, so the map runs and you can walk.
+  const [travel, setTravel] = useState<Travel | null>(null)
+  const travelState = useRef<Travel | null>(null); travelState.current = travel
   const [shop, setShop] = useState<{ type: 'food' | 'book'; label: string } | null>(null)
   const overlay = useRef(false), selection = useRef<ResidentPosition | null>(null)
   const homeState = useRef<ResidentPosition | null>(null), talkingState = useRef<ResidentPosition | null>(null)
@@ -59,7 +63,7 @@ export function WorldView({ onNavigate }: { onNavigate: (screen: WorldScreen) =>
   // an overlay opens or closes, instead of finding out up to 200ms late.
   const overlayWatcher = useRef<(() => void) | null>(null)
   const wasOverlay = overlay.current
-  overlay.current = !!talking || journal || areaInfo || !!home || !!shop; selection.current = selected
+  overlay.current = (!!talking && !travel) || journal || areaInfo || !!home || !!shop; selection.current = selected
   // With only the chat open the map is still visible around it, so it keeps
   // being redrawn (at the slow overlay rate, see tickOverlay) -- otherwise a
   // resident who steps outside mid-chat stays invisible until it closes.
@@ -77,6 +81,22 @@ export function WorldView({ onNavigate }: { onNavigate: (screen: WorldScreen) =>
   const discovered = interaction && !!discoveries[`${interaction.point.x},${interaction.point.y}`]
   const insideNow = interaction ? residentAtDoor(interaction.point, seed, simMinutes, residentOverrides) : undefined
   settings.current = { zoom, labels, selected: person?.resident.id ?? null }
+
+  // Called from chat when the resident agrees to walk somewhere with you.
+  function startTravel(t: Travel) {
+    const s = useGameStore.getState()
+    setHome(null)
+    const path = findPath({ x: s.playerX, y: s.playerY }, t.to, s.worldSeed)
+    held.current = []; route.current = path.length ? path.slice(1) : []
+    setTravel(t)
+  }
+  const arrive = useRef<((t: Travel) => void) | null>(null)
+  arrive.current = (t: Travel) => {
+    setTravel(null)
+    const s = useGameStore.getState()
+    if (t.arrive) setHome(residentPosition(t.arrive.resident, s.simMinutesTotal, s.residentOverrides[t.arrive.resident.id]))
+    canvas.current?.focus({ preventScroll: true })
+  }
 
   function talkTo(person: ResidentPosition) {
     route.current = []; held.current = []; setAnimal(null); setAreaInfo(false)
@@ -135,6 +155,7 @@ export function WorldView({ onNavigate }: { onNavigate: (screen: WorldScreen) =>
           livePeople.current = visible
           if (now - lastUi > 150) {
             lastUi = now; setPeople(visible)
+            if (talkingState.current) setTalking(old => old ? residentPosition(old.resident, state.simMinutesTotal, state.residentOverrides[old.resident.id]) : old)
             setSelected(old => old ? visible.find(p => p.resident.id === old.resident.id) ?? null : null)
           }
         } catch (e) {
@@ -192,7 +213,7 @@ export function WorldView({ onNavigate }: { onNavigate: (screen: WorldScreen) =>
     const onKeyDown = (event: KeyboardEvent) => {
       if (isTyping(event.target) || event.altKey || event.ctrlKey || event.metaKey || useGameStore.getState().assistantOpen) return
       const key = event.key.length === 1 ? event.key.toLowerCase() : event.key
-      if (key === 'Escape') { clear(); setSelected(null); setTalking(null); setJournal(false); setAreaInfo(false); setAnimal(null); setHome(null); setShop(null); return }
+      if (key === 'Escape') { clear(); setSelected(null); setTalking(null); setTravel(null); setJournal(false); setAreaInfo(false); setAnimal(null); setHome(null); setShop(null); return }
       if (overlay.current) {
         // Inside a home, with no chat open yet, E still starts talking to
         // whoever's in there -- same shortcut as outdoors, just aimed at
@@ -208,6 +229,9 @@ export function WorldView({ onNavigate }: { onNavigate: (screen: WorldScreen) =>
     }
     const onKeyUp = (event: KeyboardEvent) => { held.current = held.current.filter(k => k !== (event.key.length === 1 ? event.key.toLowerCase() : event.key)) }
     const id = window.setInterval(() => {
+      // A chat walk ends once the player's route is done and the resident has arrived too.
+      const t = travelState.current
+      if (t && !route.current.length && !held.current.length && Date.now() >= t.until) arrive.current?.(t)
       if (!held.current.length && !route.current.length) return
       if (performance.now() - lastStep.current < 155) return
       lastStep.current = performance.now(); step()
@@ -268,7 +292,8 @@ export function WorldView({ onNavigate }: { onNavigate: (screen: WorldScreen) =>
         : interaction && <div className="world-interaction" aria-live="polite"><small>{interaction.poi.screen || interaction.poi.shop ? 'COME ON IN' : discovered ? 'DISCOVERED' : 'A PLACE TO EXPLORE'}</small><strong>{interaction.poi.label}</strong>{discovered ? <p>{interaction.poi.item ? `${interaction.poi.item.name} is in your journal.` : interaction.poi.flavor}</p> : <button className="world-enter" onClick={interact}>{interaction.poi.screen || interaction.poi.shop ? 'Enter' : interaction.poi.item ? 'Explore & collect' : 'Look around'} <kbd>E</kbd></button>}</div>)}
       {home && <HomeInterior key={`home:${home.resident.id}`} person={home} crowded={!!talking} onClose={() => { setHome(null); setTalking(null); canvas.current?.focus({ preventScroll: true }) }} onTalk={() => talkTo(home)} />}
       {shop && <ShopInterior key={`shop:${shop.label}`} kind={shop.type} label={shop.label} onClose={() => { setShop(null); canvas.current?.focus({ preventScroll: true }) }} />}
-      {talking && <ResidentChat key={`chat:${talking.resident.id}`} person={talking} onClose={() => { setTalking(null); canvas.current?.focus({ preventScroll: true }) }} onEnter={position => { setHome(position); setTalking(position) }} onExit={position => { setHome(null); setTalking(position) }} />}
+      {travel && talking && <div className="world-toast" role="status">Walking to {travel.label} with {talking.resident.name}…</div>}
+      {talking && <ResidentChat key={`chat:${talking.resident.id}`} person={talking} away={!!travel} onClose={() => { setTalking(null); setTravel(null); canvas.current?.focus({ preventScroll: true }) }} onEnter={position => { setHome(position); setTalking(position) }} onExit={position => { setHome(null); setTalking(position) }} onTravel={startTravel} />}
       {areaInfo && <aside className="world-area-info" id="world-area-info" role="dialog" aria-label="Around you" onKeyDown={e => { if (e.key === 'Escape') { setAreaInfo(false); canvas.current?.focus({ preventScroll: true }) } }}>
         <header><strong>Around you</strong><button autoFocus aria-label="Close area information" onClick={() => { setAreaInfo(false); canvas.current?.focus({ preventScroll: true }) }}>×</button></header>
         <div className="world-notes">

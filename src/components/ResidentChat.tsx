@@ -1,8 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import { useGameStore } from '../store/gameStore'
 import { conversationReply, generateJSON, useLocalAI } from '../services/localAI'
-import { residentReply, residentPrompt, TALK_TOPICS, chatActions, requestedActions, intentPrompt, intentTranscript, intentSchema, parseIntent, outcomeNote, cleanReply, type ChatAction, type ChatIntent, type ChatContext } from '../world/conversations'
+import { residentReply, residentPrompt, TALK_TOPICS, chatActions, moveFor, requestedActions, intentPrompt, intentTranscript, intentSchema, parseIntent, outcomeNote, cleanReply, type ChatAction, type ChatIntent, type ChatContext } from '../world/conversations'
 import type { ResidentPosition } from '../world/residents'
+import { findPath } from '../world/pathfinding'
+import type { Point } from '../world/generation'
+
+/** A walk to the resident's other place, started from chat (see apply()).
+ *  WorldView routes the player to `to`, hides the chat until both have
+ *  arrived (`until`, Date.now()), then opens `arrive` if they went inside. */
+export interface Travel { to: Point; label: string; until: number; arrive?: ResidentPosition }
 import { ResidentPortrait } from './ResidentPortrait'
 import { ChatText } from './ChatText'
 
@@ -38,7 +45,7 @@ const UNTIL_STOP = /\b(till|until)\b[^.?!]{0,20}\bstop\b|\bkeep (on |at it|going
 const WHAT_NEXT = /\bwhat('?s| is| are| will| would)?\b[^.?!]{0,20}\b(next|do now|doing next|up to next)\b|\byou (choose|pick|decide)\b/i
 const STOP_NOW = /^\s*(ok(ay)?[,!.]?\s*)?(stop|you can stop|that'?s enough|enough|alright,? stop|done)\b/i
 
-export function ResidentChat({ person, onClose, onEnter, onExit }: { person: ResidentPosition; onClose: () => void; onEnter?: (position: ResidentPosition) => void; onExit?: (position: ResidentPosition) => void }) {
+export function ResidentChat({ person, onClose, onEnter, onExit, onTravel, away }: { person: ResidentPosition; onClose: () => void; onEnter?: (position: ResidentPosition) => void; onExit?: (position: ResidentPosition) => void; onTravel?: (travel: Travel) => void; away?: boolean }) {
   // One conversation's history. Lives only as long as this panel: it keeps
   // going while you walk in or out together (the panel stays mounted), and
   // starts fresh after you close the chat or press Clear.
@@ -91,20 +98,35 @@ export function ResidentChat({ person, onClose, onEnter, onExit }: { person: Res
   // Same side of the door first: when a request fits both ("read a book"),
   // staying put is the natural pick, for the model and the keyword matcher.
   const options = isPinned ? chatActions(person).sort((a, b) => Number(a.indoors !== inside) - Number(b.indoors !== inside)) : []
-  const canAskEnter = isPinned && !inside && person.action !== 'home' && options.some(a => a.indoors)
+  const at = person.at ?? 'home'
+  const canAskEnter = isPinned && !inside && at === 'home' && person.action !== 'home' && options.some(a => a.indoors)
   const canAskExit = isPinned && inside && options.some(a => !a.indoors)
   // Make a chosen activity real: override where they are / what they do,
   // and take the player along when it crosses the door.
   // `long`: "read till I say stop" -- holds for most of a day, until the
   // player says stop (see send) instead of the usual hour or two.
-  const apply = (a: Pick<ChatAction, 'indoors' | 'action' | 'label' | 'scene' | 'description'>, long = false) => {
-    const now = useGameStore.getState().simMinutesTotal
-    const until = now + (long ? 16 * 60 : 90 + Math.floor(Math.random() * 90))
-    useGameStore.getState().setResidentOverride(person.resident.id, { indoors: a.indoors, action: a.action, activity: a.label, scene: a.scene, description: a.description, until })
-    const moved = { ...person, action: a.action, activity: a.label, scene: a.scene, description: a.description }
-    if (a.indoors && !inside) onEnter?.({ ...moved, x: person.resident.home.x, y: person.resident.home.y, visible: false })
-    else if (!a.indoors && inside) onExit?.({ ...moved, x: (person.resident.post ?? person.resident.home).x, y: (person.resident.post ?? person.resident.home).y, visible: true })
+  const apply = (a: ChatAction, long = false) => {
+    const st = useGameStore.getState(), r = person.resident
+    const until = st.simMinutesTotal + (long ? 16 * 60 : 90 + Math.floor(Math.random() * 90))
+    const base = { indoors: a.indoors, at: a.at, action: a.action, activity: a.label, scene: a.scene, description: a.description, until }
+    const moved = { ...person, action: a.action, activity: a.label, scene: a.scene, description: a.description, at: a.at }
+    if (moveFor(a, person) === 'walk' && (a.at === 'home' || r.workPlace)) {
+      // Walk to the other place: they follow a real path at the player's
+      // pace (the override's journey), and WorldView walks the player there too.
+      const label = a.at === 'work' ? r.workPlace!.label : r.place?.label ?? 'home'
+      const door = a.at === 'work' ? r.workPlace!.door : r.home
+      const dest = a.at === 'work' ? r.workPlace!.post : a.indoors ? r.home : (r.post ?? r.home)
+      const path = findPath({ x: Math.round(person.x), y: Math.round(person.y) }, dest, st.worldSeed)
+      const msPerTile = 160
+      st.setResidentOverride(r.id, { ...base, journey: path.length > 1 ? { path, startedAt: Date.now(), msPerTile, to: label } : undefined })
+      onTravel?.({ to: door, label, until: Date.now() + Math.max(0, path.length - 1) * msPerTile, arrive: a.indoors ? { ...moved, x: r.home.x, y: r.home.y, visible: false } : undefined })
+      return
+    }
+    st.setResidentOverride(r.id, base)
+    if (a.indoors && !inside) onEnter?.({ ...moved, x: r.home.x, y: r.home.y, visible: false })
+    else if (!a.indoors && inside) onExit?.({ ...moved, x: (r.post ?? r.home).x, y: (r.post ?? r.home).y, visible: true })
   }
+
   // The last request they turned down -- only used by the offline keyword
   // matcher, so "now please" / "come on" can ask again. (With a model
   // connected the intent step reads the whole conversation instead.)
@@ -118,7 +140,7 @@ export function ResidentChat({ person, onClose, onEnter, onExit }: { person: Res
     const insisting = /^\s*(now|please|pls|plz|pretty please|come on|go on|ok|okay|yes|yeah|sure|let'?s go|why not|just for a bit|i insist)\b/i.test(said) || (said.length <= 30 && /\b(please|pls|now|insist)\b/i.test(said))
     const still = pending.current?.filter(a => options.some(o => o.label === a.label))
     const wanted = requestedActions(said, person) ?? (insisting && still?.length ? still : undefined)
-    const here = options.filter(o => o.indoors === inside && o.action !== 'sleeping')
+    const here = options.filter(o => o.indoors === inside && o.at === at && o.action !== 'sleeping')
     const picked = WHAT_NEXT.test(said) && here.length ? here[Math.floor(Math.random() * here.length)] : undefined
     return { action: wanted?.[Math.floor(Math.random() * wanted.length)], agree: Math.random() >= 0.15, reason: '', untilStop: UNTIL_STOP.test(said), stop: STOP_NOW.test(said), picked }
   }
@@ -137,20 +159,22 @@ export function ResidentChat({ person, onClose, onEnter, onExit }: { person: Res
     if (intent.learned) useGameStore.getState().learnAboutPlayer(person.resident.id, intent.learned)
     if (intent.learned) ctx.known = useGameStore.getState().residentKnowledge[person.resident.id] ?? ctx.known
     if (fromButton && !intent.action && !intent.picked) {
-      const here = options.filter(o => o.indoors === inside && o.action !== 'sleeping')
+      const here = options.filter(o => o.indoors === inside && o.at === at && o.action !== 'sleeping')
       intent.picked = here[Math.floor(Math.random() * here.length)]
     }
     let chosen: ChatAction | undefined, note = '', fallback = ''
     if (intent.stop && activeOverride()) {
       // Something else on the same side of the door, so stopping never
       // teleports them out of the room you're both standing in.
-      const here = options.filter(o => o.indoors === inside && o.action !== 'sleeping')
+      const here = options.filter(o => o.indoors === inside && o.at === at && o.action !== 'sleeping')
       chosen = here[Math.floor(Math.random() * here.length)]
       if (chosen) { note = outcomeNote(person, ctx, { kind: 'stop', action: chosen }); fallback = `*stops and stretches* Alright, that's enough of that.` }
     } else if (intent.action && intent.agree) {
       chosen = intent.action
       note = outcomeNote(person, ctx, { kind: 'agree', action: chosen, untilStop: intent.untilStop })
-      fallback = chosen.indoors && !inside ? '*opens the door* Sure, come on in.' : !chosen.indoors && inside ? '*heads for the door* Good idea, let’s step out.' : `*${chosen.label.charAt(0).toLowerCase() + chosen.label.slice(1)}* Alright, why not.`
+      const goingTo = chosen.at === 'work' ? person.resident.workPlace?.label : person.resident.place?.label
+      fallback = moveFor(chosen, person) === 'walk' ? `*sets off toward ${goingTo ?? 'there'}* Come along, then.`
+        : chosen.indoors && !inside ? '*opens the door* Sure, come on in.' : !chosen.indoors && inside ? '*heads for the door* Good idea, let’s step out.' : `*${chosen.label.charAt(0).toLowerCase() + chosen.label.slice(1)}* Alright, why not.`
     } else if (intent.action) {
       note = outcomeNote(person, ctx, { kind: 'decline', action: intent.action, reason: intent.reason })
       fallback = intent.reason ? `Not just yet, friend -- ${intent.reason.charAt(0).toLowerCase() + intent.reason.slice(1)}` : '*glances back at what they were doing* Not just yet, friend. Give me a little while.'
@@ -164,7 +188,8 @@ export function ResidentChat({ person, onClose, onEnter, onExit }: { person: Res
     // The model sees the neighbour's words plus the unseen scene note; the log keeps only the words.
     const sent = note ? [...next.slice(0, -1), { role: 'user' as const, content: said + note }] : next
     const system = residentPrompt(person, ctx, groggy)
-    const reply = await withTimeout(conversationReply(system, sent, fallback), MODEL_WAIT_MS, { text: fallback, notice: 'No reply after 5 minutes. Showing an offline reply.' })
+    // Short budget: a resident says 1-3 sentences, and a long one just rambles.
+    const reply = await withTimeout(conversationReply(system, sent, fallback, { maxTokens: 110 }), MODEL_WAIT_MS, { text: fallback, notice: 'No reply after 5 minutes. Showing an offline reply.' })
     if (id !== serial.current) return
     const outcome = intent.stop && chosen ? `stop -> ${chosen.label}` : chosen && chosen === intent.picked && !intent.action ? `picked -> ${chosen.label}` : chosen ? `do -> ${chosen.label}${intent.untilStop ? ' (until stop)' : ''}` : intent.action ? `declined ${intent.action.label}` : 'nothing asked'
     trace('intent', said, ip + '\n\n--- transcript ---\n' + transcript, raw ? JSON.stringify(raw) : '(no model / failed -> keyword matcher)', outcome + (intent.learned ? ` | learned: ${intent.learned}` : ''))
@@ -180,7 +205,7 @@ export function ResidentChat({ person, onClose, onEnter, onExit }: { person: Res
     setMessages(next); setDraft(''); setBusy(true); setNotice('')
     const fallback = (groggy ? '*still half-asleep* ' : '') + residentReply(person, text, alreadyMet.current, groggy)
     const system = residentPrompt(person, context(), groggy)
-    const reply = await withTimeout(conversationReply(system, next, fallback), MODEL_WAIT_MS, { text: fallback, notice: 'No reply after 5 minutes. Showing an offline reply.' })
+    const reply = await withTimeout(conversationReply(system, next, fallback, { maxTokens: 110 }), MODEL_WAIT_MS, { text: fallback, notice: 'No reply after 5 minutes. Showing an offline reply.' })
     if (id !== serial.current) return
     trace('chat', said, system, reply.text, 'not a pinned resident')
     setMessages([...next, { role: 'assistant', content: cleanReply(reply.text) }]); setNotice(reply.notice); setBusy(false)
@@ -198,7 +223,7 @@ export function ResidentChat({ person, onClose, onEnter, onExit }: { person: Res
       <footer>Waking someone up gets you a conversation, but a grumpier, shorter one.</footer>
     </aside>
   }
-  return <aside className="resident-chat" role="dialog" aria-label={`Talk to ${person.resident.name}`} onKeyDown={e => { if (e.key === 'Escape') onClose() }}>
+  return <aside className="resident-chat" hidden={away} role="dialog" aria-label={`Talk to ${person.resident.name}`} onKeyDown={e => { if (e.key === 'Escape') onClose() }}>
     <div className="resident-portrait-wrap"><ResidentPortrait resident={person.resident} /></div>
     <header><div><h2>{person.resident.name} <span>· {person.resident.role}</span></h2><p>{person.activity} <span className="activity-tag">{person.action}</span></p></div><button className="resident-chat-clear" disabled={messages.length < 2 && !known?.length} title={known?.length ? `Start over -- ${person.resident.name} also forgets what you've told them (${known.length})` : 'Start this conversation over'} onClick={clearChat}>Clear</button><button aria-label="Close conversation" onClick={onClose}>×</button></header>
     <div className="resident-messages" aria-live="polite">{messages.map((m, i) => <p key={i} className={m.role}><ChatText text={m.content} /></p>)}{busy && <p className="resident-thinking">Thinking…{waited >= 3 && <span> {waited}s</span>}{waited >= 5 && <button type="button" onClick={stopWaiting}>Stop waiting</button>}</p>}<div ref={end}/></div>

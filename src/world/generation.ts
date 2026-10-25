@@ -18,6 +18,12 @@ export interface Building extends Point {
    *  a ShopInterior instead of treating it as a decorative building. Workshop
    *  and Flower Shop are left untagged for now, still purely decorative. */
   shopType?: 'food' | 'book'
+  /** Set when this building comes from a TOWN_LANDMARKS entry: that entry's
+   *  stable id. This is what a resident's `home` (residents.ts) points at. */
+  landmarkId?: string
+  /** The landmark's `description`, if any -- what the place is like,
+   *  given to the local model whenever a resident is in or near it. */
+  description?: string
 }
 export interface Settlement extends Point {
   id: string
@@ -62,6 +68,17 @@ const PREFIXES = ['Willow', 'Amber', 'Cedar', 'Fern', 'Maple', 'Birch', 'Moss', 
 const SUFFIXES = ['brook', 'field', 'haven', 'ridge', 'wick', 'meadow']
 const SHOPS = ['Bakery', 'General Store', 'Coffee House', 'Bookshop', 'Workshop', 'Flower Shop']
 type Landmark = { col: number; row: number; label: string; screen?: string; flavor?: string }
+/** A hand-authored building in TOWN_LANDMARKS. `id` is the stable handle
+ *  everything else links to -- a resident's `home` in PINNED_RESIDENTS
+ *  (residents.ts) is this id -- so keep it unchanged once used. */
+export type TownLandmark = Landmark & {
+  id: string
+  /** What the place is like, in a sentence or two -- inside and out. Given to
+   *  the local model whenever a resident is in or near it, so concrete
+   *  details ("a green door, a bench out front, a fireplace inside") show
+   *  up naturally in conversation. Optional. */
+  description?: string
+}
 // The origin town's core landmarks open the app's own screens -- these are
 // part of the game itself, not meant to be edited casually.
 const CORE_LANDMARKS: Landmark[] = [
@@ -93,8 +110,36 @@ const CORE_LANDMARKS: Landmark[] = [
  *  set it if entering the building should open one of the app's own
  *  screens; leave it out for a building that's just a named place with
  *  its own flavor text. */
-export const TOWN_LANDMARKS: Record<string, Landmark[]> = {
-  '1,0': [{ col: 0, row: 0, label: 'Test House', flavor: 'Testing house' }],
+export const TOWN_LANDMARKS: Record<string, TownLandmark[]> = {
+  '1,0': [{
+    id: 'test-house', col: 0, row: 0, label: 'Test House', flavor: 'Testing house',
+    description: 'A small stone cottage with a green door and a bench out front. Inside: a low beamed room, a crackling fireplace, a worn armchair and shelves of old ledgers.',
+  }, {
+    id: 'old-trade-post', col: 1, row: 2, label: 'Old Trade Post', flavor: 'Dusty shelves of shipping records and a long wooden counter.',
+    description: 'The town’s first trading counter, now a little records room: a long scuffed counter, crates of shipping ledgers and a faded route map on the wall.',
+  }],
+}
+
+/** Where a TOWN_LANDMARKS entry lives, by its id -- the town key ("rx,ry")
+ *  and the entry itself. Undefined for an unknown id. */
+export function findLandmark(id: string): { townKey: string; landmark: TownLandmark } | undefined {
+  for (const [townKey, list] of Object.entries(TOWN_LANDMARKS)) {
+    const landmark = list.find(l => l.id === id)
+    if (landmark) return { townKey, landmark }
+  }
+  return undefined
+}
+
+// Catch authoring mistakes early (dev only): duplicate ids, or a landmark in
+// a slot that is never built (the garden, or a core landmark's slot).
+if (import.meta.env?.DEV) {
+  const seen = new Set<string>()
+  for (const [townKey, list] of Object.entries(TOWN_LANDMARKS)) for (const l of list) {
+    if (seen.has(l.id)) console.warn(`[world] TOWN_LANDMARKS: duplicate id "${l.id}" -- ids must be unique across all towns.`)
+    seen.add(l.id)
+    if (l.col === 3 && l.row === 1) console.warn(`[world] TOWN_LANDMARKS "${l.id}": slot col 3, row 1 is always the public garden -- pick another slot.`)
+    if (townKey === '0,0' && CORE_LANDMARKS.some(c => c.col === l.col && c.row === l.row)) console.warn(`[world] TOWN_LANDMARKS "${l.id}": that slot in Founders Green is taken by "${CORE_LANDMARKS.find(c => c.col === l.col && c.row === l.row)!.label}".`)
+  }
 }
 
 export function getSettlement(rx: number, ry: number, seed: number): Settlement {
@@ -112,8 +157,9 @@ export function getSettlement(rx: number, ry: number, seed: number): Settlement 
       // The north-east block is a public garden, with room to gather.
       if (col === 3 && row === 1) continue
       if (!origin && row === 0 && (col === 1 || col === 2) && (biome === 'woodland' || biome === 'highlands')) continue
-      const landmark = (origin ? CORE_LANDMARKS.find(l => l.col === col && l.row === row) : undefined)
-        ?? TOWN_LANDMARKS[townKey]?.find(l => l.col === col && l.row === row)
+      const core = origin ? CORE_LANDMARKS.find(l => l.col === col && l.row === row) : undefined
+      const authored = core ? undefined : TOWN_LANDMARKS[townKey]?.find(l => l.col === col && l.row === row)
+      const landmark: Landmark | undefined = core ?? authored
       const roll = hashCoord(x + col, y + row, seed + 27)
       const kind = landmark ? (landmark.screen === 'work' ? 'work' : 'civic') : row === 1 || row === 2 ? 'shop' : 'home'
       const shopName = SHOPS[Math.floor(roll * SHOPS.length)]
@@ -126,6 +172,7 @@ export function getSettlement(rx: number, ry: number, seed: number): Settlement 
         door: { x: bx + Math.floor(width / 2), y: by + 4 }, label, kind,
         roof: landmark?.screen === 'work' || landmark?.screen === 'chronicle' ? 0 : Math.floor(roll * 2),
         shopType,
+        landmarkId: authored?.id, description: authored?.description,
         poi: landmark
           ? { key: landmark.screen ?? `landmark:${rx},${ry}:${col},${row}`, label, screen: landmark.screen, flavor: landmark.flavor ?? 'Come in and take a look.', reward: 0 }
           : shopType

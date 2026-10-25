@@ -1,4 +1,4 @@
-import type { ResidentPosition, Resident, Activity, SceneKind } from './residents'
+import type { ResidentPosition, Resident, Activity, SceneKind, Place } from './residents'
 
 export const TALK_TOPICS = ['What are you doing?', 'Tell me about yourself', 'Any work advice?', 'What is nearby?']
 export function residentReply(person: ResidentPosition, question: string, metBefore: boolean, groggy = false, player?: string) {
@@ -29,7 +29,7 @@ export function residentReply(person: ResidentPosition, question: string, metBef
  *  comes too); an outdoor option while inside means "head back out". So
  *  adding an activity to a PINNED_RESIDENTS entry automatically makes it
  *  reachable by chat -- no extra wiring per action. */
-export interface ChatAction { label: string; indoors: boolean; action: Activity; scene?: SceneKind; description?: string; about?: string }
+export interface ChatAction { label: string; indoors: boolean; at: Place; action: Activity; scene?: SceneKind; description?: string; about?: string }
 
 /** Who the resident is talking to and what they know about them -- built
  *  by ResidentChat from the store and passed into every prompt below so
@@ -48,12 +48,22 @@ export interface ChatContext {
 
 export function chatActions(person: ResidentPosition): ChatAction[] {
   const r = person.resident
-  const out = (r.outdoorActivities ?? []).map(a => ({ label: a.label, indoors: false, action: a.action, about: a.description }))
-  const ins = (r.indoorActivities ?? []).map(a => ({ label: a.label, indoors: true, action: a.action, scene: a.scene, description: a.description, about: a.description }))
-  // Everything except exactly what they're doing right now.
-  return [...out, ...ins].filter(a => !(a.label === person.activity && a.indoors === !person.visible))
+  const out = (r.outdoorActivities ?? []).map(a => ({ label: a.label, indoors: false, at: 'home' as Place, action: a.action, about: a.description }))
+  const ins = (r.indoorActivities ?? []).map(a => ({ label: a.label, indoors: true, at: 'home' as Place, action: a.action, scene: a.scene, description: a.description, about: a.description }))
+  const work = r.workPlace ? (r.workActivities ?? []).map(a => ({ label: a.label, indoors: false, at: 'work' as Place, action: a.action, about: a.description })) : []
+  // Everything except exactly what they're doing right now, where they are now.
+  const at = person.at ?? 'home'
+  return [...out, ...ins, ...work].filter(a => !(a.label === person.activity && a.indoors === !person.visible && a.at === at))
 }
 
+/** How choosing `a` moves them: stay where they are, go through their own
+ *  front door (in or out), or walk over to their other place. */
+export function moveFor(a: ChatAction, person: ResidentPosition): 'stay' | 'in' | 'out' | 'walk' {
+  const at = person.at ?? 'home', inside = !person.visible
+  if (a.at !== at) return 'walk'
+  if (a.indoors === inside) return 'stay'
+  return a.indoors ? 'in' : 'out'
+}
 /** Words that point at an action, beyond the words in its own label. */
 const ACTION_WORDS: Partial<Record<Activity, string[]>> = {
   baking: ['bake', 'bread'], gardening: ['garden', 'plant', 'water', 'flower', 'weed'], selling: ['sell', 'stall', 'market'],
@@ -66,6 +76,8 @@ const REQUEST = /\b(can|could|would|will|shall|should|let's|lets|let us|how abou
 // "Do you like reading?" is a question about them, not a request.
 const ABOUT_THEM = /\b(do|did|have|would) you (like|love|enjoy|ever|usually|often)\b|\bwhat (kind|sort|books?|do you)\b/
 const GO_IN = /\b(come|go|step|head|get|walk|let me|let us|let's|lets|pop)\s+(on\s+|back\s+)?in\b|\b(come|go|step|head|get|walk|move|talk|chat|sit|let me|let's|lets|we|can i|may i|could i|mind if)\b[^.?!]{0,25}\b(inside|indoors)\b|\b(invite me in|your (home|house|place|cottage))\b/
+const GO_WORK = /\b(go|head|walk|let'?s go|off|back)\b[^.?!]{0,20}\b(to work|work|your (shop|job|workplace))\b/
+const GO_HOME = /\b(go|head|walk|let'?s go|back)\b[^.?!]{0,20}\bhome\b/
 const GO_OUT = /\b(go|step|head|get|walk|move|talk|chat|sit|pop)\s+(back\s+)?(out|outside|outdoors)\b|\b(go|step|head|get|walk|move|talk|chat|sit|let's|lets|we|can we|shall we)\b[^.?!]{0,25}\b(outside|outdoors)\b|\b(fresh air|for a walk)\b/
 
 /** Which chatActions() a free-typed message is asking for, if any. Loose
@@ -81,11 +93,15 @@ export function requestedActions(text: string, person: ResidentPosition): ChatAc
   // ("read"), so "show me the ledgers" doesn't also offer the porch paper.
   const byLabel = options.filter(a => labelWords(a).some(w => q.includes(w)))
   const named = byLabel.length ? byLabel : options.filter(a => (ACTION_WORDS[a.action] ?? []).some(w => q.includes(w)))
-  const wantsIn = !inside && GO_IN.test(q), wantsOut = inside && GO_OUT.test(q)
+  const at = person.at ?? 'home'
+  const wantsIn = !inside && at === 'home' && GO_IN.test(q), wantsOut = inside && GO_OUT.test(q)
+  // "let's go to work" / "head home" -- walking to their other place.
+  const wantsWork = at === 'home' && GO_WORK.test(q), wantsHome = at === 'work' && GO_HOME.test(q)
+  if (wantsWork || wantsHome) { const there = options.filter(a => a.at === (wantsWork ? 'work' : 'home') && a.action !== 'sleeping'); if (there.length) return there }
   if (named.length && ((REQUEST.test(q) && !ABOUT_THEM.test(q)) || wantsIn || wantsOut)) {
     // "let's go inside and read" -> only the indoor reading option, etc.;
     // with no in/out wording, prefer staying where they are.
-    const here = named.filter(a => a.indoors === inside)
+    const here = named.filter(a => a.indoors === inside && a.at === at)
     const side = wantsIn ? named.filter(a => a.indoors) : wantsOut ? named.filter(a => !a.indoors) : here.length ? here : named
     if (side.length) return side
   }
@@ -93,24 +109,39 @@ export function requestedActions(text: string, person: ResidentPosition): ChatAc
   // which you'd only want if you asked for it by name.
   const awake = (a: ChatAction) => a.action !== 'sleeping'
   if (wantsIn) { const ins = options.filter(a => a.indoors && awake(a)); return ins.length ? ins : undefined }
-  if (wantsOut) { const outs = options.filter(a => !a.indoors && awake(a)); return outs.length ? outs : undefined }
+  if (wantsOut) { const outs = options.filter(a => !a.indoors && a.at === 'home' && awake(a)); return outs.length ? outs : undefined }
   return undefined
 }
 
-/** Shared scene wording, so every prompt says exactly whose place this
- *  is and where both people are. A resident without an indoor pool (a
- *  hired worker, an expert) is simply "at" their workplace. */
-function sceneFor(person: ResidentPosition, ctx: ChatContext, voice: 'second' | 'third') {
-  const r = person.resident, inside = !person.visible, p = ctx.player
-  const hasHome = !!r.indoorActivities?.length
-  const own = voice === 'second' ? 'your own home' : `${r.name}'s own home`
-  const subject = voice === 'second' ? 'You are' : `${r.name} is`
-  if (!hasHome) return `${subject} at ${r.workplace} in ${r.town}, with ${p}.`
-  return inside
-    ? `${subject} inside ${own} (${r.workplace}, ${r.town}); ${p} is there too.`
-    : `${subject} outside, by the front door of ${own} (${r.workplace}, ${r.town}); ${p} is standing there with ${voice === 'second' ? 'you' : r.name}.`
-}
+/** The building a resident lives in, by name -- from the landmark their
+ *  PinnedResident.home links to (Resident.place). Falls back to their
+ *  workplace label for residents without one. */
+const placeName = (r: Resident) => r.place?.label ?? r.workplace
+/** The building for `at` -- their home landmark or their work landmark. */
+const placeOf = (r: Resident, at: Place) => at === 'work' && r.workPlace ? r.workPlace.label : placeName(r)
+/** "Test House (your home)" / "Old Trade Post (where you work)" -- so a
+ *  request like "take me to your home" maps onto the right option. */
+const placeWithRole = (r: Resident, at: Place, voice: 'second' | 'third') =>
+  `${placeOf(r, at)} (${at === 'work' ? (voice === 'second' ? 'where you work' : `where ${r.name} works`) : (voice === 'second' ? 'your home' : `${r.name}'s home`)})`
 
+/** Shared scene wording, so every prompt names the actual building and
+ *  says where both people are. A resident without an indoor pool (a hired
+ *  worker, an expert) is simply "at" their workplace. */
+function sceneFor(person: ResidentPosition, ctx: ChatContext, voice: 'second' | 'third') {
+  const r = person.resident, inside = !person.visible, p = ctx.player, place = placeName(r)
+  const subject = voice === 'second' ? 'You are' : `${r.name} is`
+  const whose = voice === 'second' ? 'your home' : `${r.name}'s home`
+  const withThem = voice === 'second' ? 'you' : r.name
+  if ((person.at ?? 'home') === 'work' && r.workPlace) {
+    const w = r.workPlace
+    return `${subject} at ${w.label} (where ${voice === 'second' ? 'you work' : `${r.name} works`}) in ${r.town}, by the door; ${p} is there with ${withThem}.${w.description ? ` ${w.label}: ${aside(w.description)}.` : ''} ${voice === 'second' ? 'Your' : `${r.name}'s`} home is ${place}, a short walk away.`
+  }
+  const about = (r.place?.description ? ` ${place}: ${aside(r.place.description)}.` : '') + (r.workPlace ? ` ${voice === 'second' ? 'You work' : `${r.name} works`} at ${r.workPlace.label}, a short walk away.` : '')
+  if (!r.indoorActivities?.length) return `${subject} at ${place} in ${r.town}, with ${p}.${about}`
+  return (inside
+    ? `${subject} inside ${place} (${whose}) in ${r.town}; ${p} is there too, as a guest.`
+    : `${subject} outside ${place} (${whose}) in ${r.town}, by the front door; ${p} is standing there with ${withThem}.`) + about
+}
 const timeOfDay = (hour: number) => hour < 5 ? 'late at night' : hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : hour < 21 ? 'evening' : 'night'
 const lower = (t: string) => t.charAt(0).toLowerCase() + t.slice(1)
 /** A description as an aside: original case (they're written "Tam is ..."), no trailing full stop. */
@@ -119,14 +150,15 @@ const aside = (t?: string) => t ? t.trim().replace(/[.\s]+$/, '') : ''
 /** One line per option for the intent step: what it is, and whether
  *  choosing it means staying put or both of them going through the door. */
 function optionLine(a: ChatAction, i: number, person: ResidentPosition, ctx: ChatContext, voice: 'second' | 'third' = 'third') {
-  const r = person.resident, inside = !person.visible
-  const home = voice === 'second' ? 'your home' : `${r.name}'s home`, both = voice === 'second' ? `you and ${ctx.player}` : `${r.name} and ${ctx.player}`
-  const where = a.indoors === inside
-    ? (inside ? `stay inside ${home}` : `stay outside ${home}`)
-    : a.indoors ? `${both} go inside ${home} together` : `${both} go out the front door together`
+  const r = person.resident, inside = !person.visible, here = placeOf(r, person.at ?? 'home'), there = placeOf(r, a.at)
+  const both = voice === 'second' ? `you and ${ctx.player}` : `${r.name} and ${ctx.player}`
+  const move = moveFor(a, person)
+  const where = move === 'stay' ? (inside ? `stay inside ${here}` : `stay at ${here}`)
+    : move === 'in' ? `${both} go inside ${here} together`
+    : move === 'out' ? `${both} go out of ${here} together`
+    : `${both} walk over to ${placeWithRole(r, a.at, voice)} together${a.indoors ? ' and go inside' : ''}`
   return `${i + 1}. ${a.label}${a.about ? ` -- ${aside(a.about)}` : ''} [${where}]`
 }
-
 /** What the player's latest message means for a pinned resident -- the
  *  result of the intent step (intentPrompt -> parseIntent) when a model is
  *  connected, or of the keyword matcher (requestedActions) offline. */
@@ -152,7 +184,7 @@ export function intentPrompt(person: ResidentPosition, options: ChatAction[], ct
     ...options.map((a, i) => optionLine(a, i, person, ctx, 'second')),
     ``,
     `Read the conversation, especially ${p}'s LATEST message, and fill in:`,
-    `- asked: the number of the thing ${p} wants you to do now. Count it however it is worded, when ${p} insists again after a no ("now please"), or when ${p} says yes to something you suggested. 0 if ${p} is not asking for one of these.`,
+    `- asked: the number of the thing ${p} wants you to do now. Count it however it is worded -- including asking to go somewhere (your home, your work, inside, outside): then pick the option at that place -- when ${p} insists again after a no ("now please"), or when ${p} says yes to something you suggested. 0 if ${p} is not asking for one of these.`,
     `- agree: would you go along with it, being who you are, at this moment? You usually agree unless you have a real reason not to.`,
     `- reason: if agree is false, your reason in a few words; otherwise "".`,
     `- untilStop: true if ${p} wants you to keep at it until they tell you to stop.`,
@@ -204,22 +236,47 @@ export function intentSchema(options: ChatAction[]): Record<string, unknown> {
  *  step, so what the resident SAYS matches what the intent step decided
  *  they DO. */
 export function outcomeNote(person: ResidentPosition, ctx: ChatContext, outcome: { kind: 'agree' | 'decline' | 'stop' | 'pick'; action: ChatAction; reason?: string; untilStop?: boolean }): string {
-  const inside = !person.visible, a = outcome.action, p = ctx.player
+  const a = outcome.action, p = ctx.player, r = person.resident
   const doing = lower(a.label) + (a.about ? ` (${aside(a.about)})` : '')
+  const here = placeOf(r, person.at ?? 'home'), there = placeOf(r, a.at)
   let what: string
   if (outcome.kind === 'decline') what = `${p} asked you to do something -- ${doing} -- but you'd rather not right now${outcome.reason ? ` (${outcome.reason})` : ''}. Say so kindly, in your own way`
   else {
     const lead = outcome.kind === 'pick' ? 'you decide to' : 'you agree and'
-    const move = a.indoors === inside
+    const move = moveFor(a, person)
+    const how = move === 'stay'
       ? `${outcome.kind === 'stop' ? 'you stop what you were doing and switch to' : outcome.kind === 'pick' ? 'you decide to get on with' : 'you agree and start'}: ${doing}`
-      : a.indoors ? `${lead} take ${p} inside your home with you, where you'll be ${doing}` : `${lead} head out the front door with ${p}; outside you'll be ${doing}`
-    what = `${move}${outcome.untilStop ? `, and you'll keep at it until ${p} tells you to stop` : ''}. Show what you do in *asterisks*`
+      : move === 'in' ? `${lead} take ${p} inside ${here} with you, where you'll be ${doing}`
+      : move === 'out' ? `${lead} head out of ${here} with ${p}; outside you'll be ${doing}`
+      : `${lead} set off walking to ${placeWithRole(r, a.at, 'second')} with ${p}${a.indoors ? ' and go inside' : ''}; once there you'll be ${doing}`
+    what = `${how}${outcome.untilStop ? `, and you'll keep at it until ${p} tells you to stop` : ''}. Show what you do in *asterisks*`
   }
   return `\n\n[Scene note, not said aloud: ${what}. Reply as yourself in 1-2 short sentences. Don't start with yes or no.]`
+}/** A reply ready for the chat log: leaked tags removed, plus any leading
+ *  bare "YES"/"No." decision word the model added anyway, and cut to at
+ *  most `maxSentences` -- small models ramble well past "1-3 sentences" and
+ *  then get cut off mid-word by the token limit. */
+export function cleanReply(text: string, maxSentences = 3): string {
+  return trimSentences(cleanDecision(text), maxSentences)
 }
-/** A reply ready for the chat log: leaked tags removed, plus any leading
- *  bare "YES"/"No." decision word the model added anyway. */
-export function cleanReply(text: string): string {
+
+/** First `max` sentences; a trailing unfinished fragment is dropped when
+ *  there's at least one complete sentence before it. *Stage directions*
+ *  don't count as sentences. */
+export function trimSentences(text: string, max: number): string {
+  const parts = text.match(/\*[^*\n]+\*\s*|[^.!?*]+(?:[.!?]+["'”’)]*\s*|$)/g) ?? [text]
+  let out = '', count = 0
+  for (const part of parts) {
+    if (/^\*/.test(part)) { out += part; continue }
+    const complete = /[.!?]["'”’)]*\s*$/.test(part)
+    if (!complete && count > 0) break
+    out += part
+    if (complete && ++count >= max) break
+  }
+  return out.trim() || text.trim()
+}
+
+function cleanDecision(text: string): string {
   const shown = stripTags(text).text
   const m = shown.match(/^([*_"'`]*)(yes|no)\1(.*)$/is)
   if (m && (m[1] || /^[ \t]*([.!,:;\-—]|\n|$)/.test(m[3]))) return m[3].replace(/^\s*[.!,:;\-—]*\s*/, '').trim() || shown

@@ -47,9 +47,9 @@ export function HomeInterior({ person, onTalk, onClose, crowded }: { person: Res
     }).catch(() => {})
     return () => { cancelled = true; cancelAnimationFrame(frame) }
   }, [person.scene, person.action, person.resident.sprite, person.resident.sprites])
-  return <aside className={`home-interior${crowded ? ' home-interior--crowded' : ''}`} role="dialog" aria-label={`Inside ${person.resident.name}'s home`} onKeyDown={e => { if (e.key === 'Escape') onClose() }}>
+  return <aside className={`home-interior${crowded ? ' home-interior--crowded' : ''}`} role="dialog" aria-label={`Inside ${person.resident.place?.label ?? `${person.resident.name}'s home`}`} onKeyDown={e => { if (e.key === 'Escape') onClose() }}>
     <div className="home-interior-card">
-      <header><div><h2>{person.resident.name}’s home</h2><p>{person.activity} <span className="activity-tag">{person.action}</span></p></div><button aria-label="Close" onClick={onClose}>×</button></header>
+      <header><div><h2>{person.resident.place?.label ?? `${person.resident.name}’s home`}</h2><p>{person.activity} <span className="activity-tag">{person.action}</span></p></div><button aria-label="Close" onClick={onClose}>×</button></header>
       <canvas ref={ref} width={W} height={H} aria-hidden="true" className="home-interior-canvas" />
       {person.description && <p className="home-interior-note">{person.description}</p>}
       <div className="home-interior-actions"><button className="world-enter" onClick={onTalk}>Talk <kbd>E</kbd></button></div>

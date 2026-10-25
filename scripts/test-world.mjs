@@ -7,7 +7,9 @@ import { execFileSync } from 'node:child_process'
 const temp = await mkdtemp(join(tmpdir(), 'forge-world-tests-'))
 try {
   for (const entry of ['world', 'local-ai-client']) {
-    const result = await build({ entryPoints: [`tests/${entry}.test.ts`], bundle: true, platform: 'node', format: 'cjs', write: false, define: { 'import.meta.env.DEV': entry === 'local-ai-client' ? 'true' : 'false' } })
+    const result = await build({ entryPoints: [`tests/${entry}.test.ts`], bundle: true, platform: 'node', format: 'cjs', write: false,
+      // Character art (residents.ts imports PNGs / videos) -- tests only need a path-like value.
+      loader: { '.png': 'dataurl', '.jpg': 'dataurl', '.webp': 'dataurl', '.webm': 'empty', '.mp4': 'empty' }, define: { 'import.meta.env.DEV': entry === 'local-ai-client' ? 'true' : 'false' } })
     const file = join(temp, `${entry}.cjs`)
     await writeFile(file, result.outputFiles[0].text)
     execFileSync(process.execPath, [file], { stdio: 'inherit' })

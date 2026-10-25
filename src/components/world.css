@@ -126,3 +126,5 @@
 .resident-chat-clear:disabled { opacity: .4; }
 .resident-thinking span { opacity: .65; font-size: 12px; }
 .resident-thinking button { margin-left: 10px; font-size: 11px; color: #d7ddba; border: 1px solid #7c916c; border-radius: 12px; padding: 1px 8px; }
+/* Chat stays mounted (keeps its history) but out of the way while walking somewhere together. */
+.resident-chat[hidden] { display: none !important; }
