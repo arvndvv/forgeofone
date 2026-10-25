@@ -6,6 +6,7 @@ import { MiraPet } from './MiraPet'
 export function MiraWidget({ docked = false }: { docked?: boolean }) {
   const open = useGameStore(s => s.assistantOpen), chat = useGameStore(s => s.chat)
   const thinking = useGameStore(s => s.miraThinking), notice = useGameStore(s => s.miraNotice)
+  const preferFreeText = useGameStore(s => s.preferFreeTextChallenges)
   const ai = useLocalAI(), [draft, setDraft] = useState(''), [settings, setSettings] = useState(false)
   const [happy, setHappy] = useState(false), end = useRef<HTMLDivElement>(null), input = useRef<HTMLInputElement>(null)
   useEffect(() => { if (open) input.current?.focus() }, [open])
@@ -27,7 +28,7 @@ export function MiraWidget({ docked = false }: { docked?: boolean }) {
       <label className="mira-checkbox-label">
         <input
           type="checkbox"
-          checked={useGameStore(s => s.preferFreeTextChallenges)}
+          checked={preferFreeText}
           onChange={e => useGameStore.getState().setPreferFreeTextChallenges(e.target.checked)}
         />
         Type your own answer to situations by default (changeable each time)
