@@ -1,4 +1,5 @@
 import atlasUrl from '../assets/game/world/town-atlas.png'
+import { mediaNow, mediaSize } from './spriteMedia'
 import farmUrl from '../assets/game/world/farm-atlas.png'
 import { CHUNK_SIZE, getTile, hashCoord, nearbySettlements, type Building, type Point } from './generation'
 import { getResidents, residentPosition, employeeResidents, dynamicExpertResidents, type ResidentPosition, type ResidentOverride } from './residents'
@@ -35,18 +36,11 @@ const loadImage = (url: string) => new Promise<HTMLImageElement>((resolve, rejec
 })
 
 // Custom per-resident sprites (Resident.sprites / a pinned character's own
-// art) are arbitrary, user-supplied images rather than atlas tiles, loaded
-// lazily on first use. A pending or failed load just falls back to the
-// code-drawn character for that frame; the image appears once it resolves.
-const customSprites = new Map<string, HTMLImageElement | 'loading' | 'error'>()
-function customSprite(src: string): HTMLImageElement | null {
-  const cached = customSprites.get(src)
-  if (cached === 'loading' || cached === 'error' || !cached) {
-    if (!cached) { customSprites.set(src, 'loading'); loadImage(src).then(img => customSprites.set(src, img)).catch(() => customSprites.set(src, 'error')) }
-    return null
-  }
-  return cached
-}
+// art) are arbitrary, user-supplied images or looping videos (see
+// spriteMedia.ts) rather than atlas tiles, loaded lazily on first use. A
+// pending or failed load just falls back to the code-drawn character for
+// that frame; the art appears once it resolves.
+const customSprite = mediaNow
 
 export async function createRenderer(canvas: HTMLCanvasElement, minimap: HTMLCanvasElement) {
   const [atlas, farm] = await Promise.all([atlasUrl, farmUrl].map(loadImage))
@@ -278,7 +272,7 @@ export async function createRenderer(canvas: HTMLCanvasElement, minimap: HTMLCan
         const customUrl = p.resident.sprites?.[p.action] ?? p.resident.sprites?.default
         const custom = customUrl ? customSprite(customUrl) : null
         if (custom) {
-          const h = 1.55, w = h * (custom.naturalWidth / custom.naturalHeight)
+          const size = mediaSize(custom), h = 1.55, w = h * (size.width / size.height)
           ctx.drawImage(custom, p.x + 0.5 - w / 2, p.y + 0.92 - h, w, h)
         } else {
           drawResident(ctx, p.x, p.y, p.facing, state.minutes * 2400 + p.resident.sprite * 400, p.moving && !state.reducedMotion, p.resident.sprite)

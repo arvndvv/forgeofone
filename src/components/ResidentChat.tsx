@@ -4,6 +4,7 @@ import { conversationReply, useLocalAI } from '../services/localAI'
 import { residentReply, residentPrompt, TALK_TOPICS, residentDecisionPrompt, residentDecisionFallback, parseResidentDecision, chatActions, requestedActions, actionRequestInstruction, parseActionRequest, chatActionSuffix, parseChatAction, type ChatAction } from '../world/conversations'
 import type { ResidentPosition } from '../world/residents'
 import { ResidentPortrait } from './ResidentPortrait'
+import { ChatText } from './ChatText'
 
 // Belt-and-suspenders: the backend already times out (45s), but this makes
 // sure 'Thinking...' -- and the buttons disabled while busy -- can never
@@ -17,9 +18,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout: T): Promise<
 }
 
 export function ResidentChat({ person, onClose, onEnter, onExit }: { person: ResidentPosition; onClose: () => void; onEnter?: (position: ResidentPosition) => void; onExit?: (position: ResidentPosition) => void }) {
-  // Restored from the store so the conversation continues across closing
-  // the panel, walking inside together, or pressing Talk again.
-  const [messages, setMessages] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>(() => useGameStore.getState().residentChats[person.resident.id] ?? [])
+  // One conversation's history. Lives only as long as this panel: it keeps
+  // going while you walk in or out together (the panel stays mounted), and
+  // starts fresh after you close the chat or press Clear.
+  const [messages, setMessages] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([])
   const [draft, setDraft] = useState(''), [busy, setBusy] = useState(false), [notice, setNotice] = useState('')
   // Asleep residents don't get a real conversation until their own
   // schedule wakes them -- unless the player explicitly wakes them, which
@@ -35,14 +37,15 @@ export function ResidentChat({ person, onClose, onEnter, onExit }: { person: Res
     if (asleep) return
     if (!registered.current) { registered.current = true; const r = person.resident; useGameStore.getState().meetResident(r.id, r.name, r.role) }
     const greeting = person.action === 'sleeping'
-      ? `(yawns, rubbing their eyes) Mmph... what is it? I was asleep.`
+      ? `*yawns, rubbing their eyes* Mmph... what is it? I was asleep.`
       : residentReply(person, 'hello', alreadyMet.current)
-    // Only greet when there's no earlier conversation to pick up from, or
-    // when the player has just woken them (that's a new moment worth a line).
-    setMessages(old => old.length && person.action !== 'sleeping' ? old : [...old, { role: 'assistant', content: greeting }])
+    setMessages(old => old.length ? old : [{ role: 'assistant', content: greeting }])
     return () => { serial.current++ }
   }, [asleep])
-  useEffect(() => { if (messages.length) useGameStore.getState().setResidentChat(person.resident.id, messages) }, [messages])
+  const clearChat = () => {
+    serial.current++; setBusy(false); setNotice(''); setDraft('')
+    setMessages([{ role: 'assistant', content: residentReply(person, 'hello', true) }])
+  }
   useEffect(() => { end.current?.scrollIntoView({ block: 'nearest' }) }, [messages, busy])
   const groggy = person.action === 'sleeping' && woke
   const isPinned = !!person.resident.outdoorActivities?.length
@@ -80,7 +83,7 @@ export function ResidentChat({ person, onClose, onEnter, onExit }: { person: Res
     if (wanted?.length) { void request(said, wanted); return }
     const next = [...messages, { role: 'user' as const, content: said }].slice(-16), id = ++serial.current
     setMessages(next); setDraft(''); setBusy(true); setNotice('')
-    const fallback = (groggy ? '(still half-asleep) ' : '') + residentReply(person, text, alreadyMet.current, groggy)
+    const fallback = (groggy ? '*still half-asleep* ' : '') + residentReply(person, text, alreadyMet.current, groggy)
     const system = residentPrompt(person, groggy) + (isPinned ? chatActionSuffix(person) : '')
     const reply = await withTimeout(conversationReply(system, next, fallback), 20000, { text: fallback, notice: 'That took too long. Showing an offline reply.' })
     if (id !== serial.current) return
@@ -115,8 +118,8 @@ export function ResidentChat({ person, onClose, onEnter, onExit }: { person: Res
   }
   return <aside className="resident-chat" role="dialog" aria-label={`Talk to ${person.resident.name}`} onKeyDown={e => { if (e.key === 'Escape') onClose() }}>
     <div className="resident-portrait-wrap"><ResidentPortrait resident={person.resident} /></div>
-    <header><div><h2>{person.resident.name} <span>· {person.resident.role}</span></h2><p>{person.activity} <span className="activity-tag">{person.action}</span></p></div><button aria-label="Close conversation" onClick={onClose}>×</button></header>
-    <div className="resident-messages" aria-live="polite">{messages.map((m, i) => <p key={i} className={m.role}>{m.content}</p>)}{busy && <p>Thinking…</p>}<div ref={end}/></div>
+    <header><div><h2>{person.resident.name} <span>· {person.resident.role}</span></h2><p>{person.activity} <span className="activity-tag">{person.action}</span></p></div><button className="resident-chat-clear" disabled={messages.length < 2} title="Start this conversation over" onClick={clearChat}>Clear</button><button aria-label="Close conversation" onClick={onClose}>×</button></header>
+    <div className="resident-messages" aria-live="polite">{messages.map((m, i) => <p key={i} className={m.role}><ChatText text={m.content} /></p>)}{busy && <p>Thinking…</p>}<div ref={end}/></div>
     {notice && <p className="conversation-notice" role="status">{notice}</p>}
     <div className="conversation-topics">{TALK_TOPICS.map(topic => <button key={topic} disabled={busy} onClick={() => void send(topic)}>{topic}</button>)}</div>
     {isPinned && <div className="conversation-topics">

@@ -118,3 +118,9 @@
   .world-location-chip { max-width: calc(100% - 112px); }
 }
 .activity-tag { display: inline-block; margin-left: 6px; padding: 1px 7px; font-size: 10px; letter-spacing: 0.6px; text-transform: uppercase; color: #1e2f22; background: #cddb9f; border-radius: 999px; vertical-align: middle; }
+/* *stage directions* in resident chat, see ChatText.tsx */
+.chat-emote { font-style: italic; color: #c9d9a8; opacity: .9; }
+.chat-emote::before, .chat-emote::after { content: ''; }
+.resident-messages p .chat-emote { display: inline; padding: 0 1px; }
+.resident-chat-clear { font-size: 11px; color: #d7ddba; border: 1px solid #7c916c; border-radius: 12px; padding: 2px 8px; margin-right: 6px; }
+.resident-chat-clear:disabled { opacity: .4; }

@@ -126,7 +126,7 @@ export function parseActionRequest(text: string, wanted: ChatAction[]): { grante
     const rest = lines[0].replace(/^[*_"'`\s]*(yes|no)[*_"'`.!:,\s-]*/i, '').trim()
     body = rest ? [rest, ...lines.slice(1)] : lines.slice(1)
   }
-  const shown = body.filter(l => !/^\s*\**\s*(ACTION|SAY|DOING)\s*\**\s*:\s*$/i.test(l)).map(l => l.replace(/^\s*\**\s*(SAY|ACTION|DOING)\s*\**\s*:\s*/i, '')).join('\n').trim()
+  const shown = stripTags(body.join('\n')).text
   if (granted === undefined) {
     const agrees = AGREE.test(shown), declines = DECLINE.test(shown)
     granted = agrees || !declines
@@ -138,29 +138,75 @@ export function parseActionRequest(text: string, wanted: ChatAction[]): { grante
   return { granted: true, action, text: shown || 'Alright.' }
 }
 
-/** Extra instructions for an ordinary chat reply, so a model can also act
- *  on requests requestedActions() didn't catch, or suggest something on
- *  its own. Read back by parseChatAction(). */
+/** Extra instructions for an ordinary chat reply. Rather than a machine
+ *  tag (small models leak it into the chat, or name things that don't
+ *  exist), the model narrates what it physically does in *asterisks* --
+ *  which reads naturally, is styled in the chat (ChatText), and is matched
+ *  back to a real activity by parseChatAction() below. */
 export function chatActionSuffix(person: ResidentPosition): string {
   const options = chatActions(person)
   if (!options.length) return ''
-  return ` You can also actually do things. If the player asks or suggests one of these and you agree, or you decide to do one yourself, say so and add a final line exactly "ACTION: <option copied exactly>". Options: ${options.map(a => describe(a, person)).join('; ')}. Otherwise add no ACTION line.`
+  return ` When you physically do something, describe it briefly in *asterisks*, e.g. *picks up the paper*. If the player asks you to do something and you agree, or you decide to on your own, actually do it in asterisks. Things you can do right now: ${options.map(a => describe(a, person)).join('; ')}. Never write labels like "Action:" -- just speak and act in character.`
 }
 
-/** Strips an ACTION line (and any stray SAY: prefix) off a reply and
- *  resolves it against chatActions(). `action` is undefined for "none",
- *  no tag, or a tag naming nothing on offer. */
+const TAG_LINE = /^\s*[*_[(]*\s*(ACTION|DOING|NEXT|SAY|ENTER|INVITE)\s*[*_\])]*\s*:/i
+const TAG_INLINE = /[[(*_]*\s*\b(ACTION|DOING|NEXT)\s*[*_]*\s*:\s*([^\n\])*]*)[\])*_]*/gi
+
+/** Removes any leaked "Action: ..." style tag, on its own line or inline,
+ *  returning the clean text and the tag values found. SAY: prefixes are
+ *  unwrapped rather than dropped. */
+export function stripTags(text: string): { text: string; tags: string[] } {
+  const tags: string[] = []
+  const lines = text.split('\n').flatMap(line => {
+    const m = line.match(TAG_LINE)
+    if (!m) return [line]
+    const value = line.replace(TAG_LINE, '').replace(/[*_\])]+\s*$/, '').trim()
+    if (/^say$/i.test(m[1])) return value ? [value] : []
+    if (value) tags.push(value)
+    return []
+  })
+  const clean = lines.join('\n').replace(TAG_INLINE, (_all, _k, value: string) => { if (value.trim()) tags.push(value.trim()); return '' })
+  return { text: clean.replace(/[ \t]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim(), tags }
+}
+
+/** *Stage directions* in a reply, without the asterisks. */
+export const emotes = (text: string) => [...text.matchAll(/\*{1,2}([^*\n]+)\*{1,2}/g)].map(m => m[1].trim())
+
+const DOOR_IN = /\b(inside|indoors|in the door|the door|leads you in|steps in|heads in|goes in|ushers you)\b/i
+const DOOR_OUT = /\b(outside|outdoors|out the door|the door|steps out|heads out|goes out|fresh air)\b/i
+
+/** Best real activity for a free-form phrase ("picks up the paper",
+ *  "reading" from a stray tag). Only actions this resident actually has
+ *  can come back; anything else is ignored. Crossing the door needs door
+ *  wording (or an explicit tag, `allowCross`). */
+export function matchAction(phrase: string, person: ResidentPosition, allowCross = false): ChatAction | undefined {
+  const q = phrase.toLowerCase(), inside = !person.visible
+  const cross = allowCross || (inside ? DOOR_OUT.test(q) : DOOR_IN.test(q))
+  let best: ChatAction | undefined, bestScore = 0
+  for (const a of chatActions(person)) {
+    if (a.indoors !== inside && !cross) continue
+    const label = a.label.toLowerCase()
+    if (label === q.trim()) return a
+    let score = a.label.toLowerCase().split(/[^a-z]+/).filter(w => w.length > 3 && !STOP.has(w) && q.includes(w)).length * 2
+    score += (ACTION_WORDS[a.action] ?? []).filter(w => q.includes(w)).length
+    if (q.includes(a.action.replace(/ing$/, ''))) score += 1
+    if (a.indoors === inside) score += 0.5 * Math.sign(score) // ties stay where they are
+    if (score > bestScore) { best = a; bestScore = score }
+  }
+  // A bare door move ("*leads you inside*") with nothing more specific.
+  if (!best && cross && (inside ? DOOR_OUT.test(q) : DOOR_IN.test(q))) best = chatActions(person).find(a => a.indoors !== inside && a.action !== 'sleeping')
+  return best
+}
+
+/** Cleans an ordinary chat reply and works out whether it actually did
+ *  something: an explicit tag (if the model leaked one anyway) wins, then
+ *  the last *stage direction* that matches a real activity. */
 export function parseChatAction(text: string, person: ResidentPosition): { text: string; action?: ChatAction } {
-  const lines = text.split('\n')
-  const isTag = (l: string, key: string) => new RegExp(`^\\s*\\**\\s*${key}\\s*\\**\\s*:`, 'i').test(l)
-  const tag = lines.find(l => isTag(l, 'ACTION'))
-  const shown = lines.filter(l => !isTag(l, 'ACTION')).map(l => isTag(l, 'SAY') ? l.replace(/^[^:]*:/, '').trim() : l).join('\n').trim()
-  const wanted = tag?.replace(/^[^:]*:/, '').replace(/\*/g, '').replace(/\((go inside|head back outside) together\)/i, '').trim().toLowerCase()
-  if (!wanted || wanted === 'none' || wanted.startsWith('no')) return { text: shown || text.trim() }
-  const options = chatActions(person)
-  const action = options.find(a => a.label.toLowerCase() === wanted)
-    ?? options.find(a => wanted.includes(a.label.toLowerCase()) || a.label.toLowerCase().includes(wanted))
-  return { text: shown || text.trim(), action }
+  const { text: shown, tags } = stripTags(text)
+  for (const tag of tags) { const a = matchAction(tag, person, true); if (a) return { text: shown || text.trim(), action: a } }
+  const directions = emotes(shown)
+  for (let i = directions.length - 1; i >= 0; i--) { const a = matchAction(directions[i], person); if (a) return { text: shown, action: a } }
+  return { text: shown || text.trim() }
 }
 
 export function residentPrompt(person: ResidentPosition, groggy = false) {

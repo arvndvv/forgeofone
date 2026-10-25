@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { drawResident } from '../world/characterArt'
 import type { Resident } from '../world/residents'
+import { isVideoSrc } from '../world/spriteMedia'
 
 /** The image/portrait shown top-left of a resident's chat box. A custom
  *  `resident.portrait` (a transparent PNG import) is used if set; otherwise
@@ -15,6 +16,7 @@ export function ResidentPortrait({ resident }: { resident: Resident }) {
     ctx.scale(80, 80)
     drawResident(ctx, 0.1, 0.45, 'south', 0, false, resident.sprite)
   }, [resident.portrait, resident.sprite])
+  if (resident.portrait && isVideoSrc(resident.portrait)) return <video src={resident.portrait} autoPlay muted loop playsInline aria-hidden="true" className="resident-portrait-img" />
   if (resident.portrait) return <img src={resident.portrait} alt="" className="resident-portrait-img" />
   return <canvas ref={ref} width={96} height={112} aria-hidden="true" className="resident-portrait-img" />
 }

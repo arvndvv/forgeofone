@@ -745,12 +745,6 @@ interface GameState {
   // Keyed by resident.id -- small enough it rides along in the autosave too.
   residentOverrides: Record<string, ResidentOverride>
   setResidentOverride: (id: string, override: ResidentOverride) => void
-  /** Per-resident conversation log (keyed by resident.id), so closing the
-   *  chat, walking inside with them, or pressing Talk again continues the
-   *  same conversation instead of starting over. Session memory only, same
-   *  as contacts. Capped at the last 40 lines per resident. */
-  residentChats: Record<string, Array<{ role: 'user' | 'assistant'; content: string }>>
-  setResidentChat: (id: string, messages: Array<{ role: 'user' | 'assistant'; content: string }>) => void
 
   // onboarding / quest system
   quests: Quest[]
@@ -1172,7 +1166,6 @@ export const useGameStore = create<GameState>()(
   _readingBookId: null,
   contacts: {},
   residentOverrides: {},
-  residentChats: {},
 
   quests: QUEST_DEFS.map((q) => ({ ...q, completed: false })),
   everOvercommitted: false,
@@ -1190,7 +1183,7 @@ export const useGameStore = create<GameState>()(
 
   createCharacter: (name) => {
     miraRequest++
-    set({ playerName: name, playerX: 0, playerY: 0, playerFacing: 'south', worldSeed: Math.floor(Math.random() * 1_000_000), discoveries: {}, inventory: [], bookShopStock: STATIC_BOOKS.slice(), library: [], contacts: {}, residentOverrides: {}, residentChats: {}, miraThinking: false, miraNotice: '' })
+    set({ playerName: name, playerX: 0, playerY: 0, playerFacing: 'south', worldSeed: Math.floor(Math.random() * 1_000_000), discoveries: {}, inventory: [], bookShopStock: STATIC_BOOKS.slice(), library: [], contacts: {}, residentOverrides: {}, miraThinking: false, miraNotice: '' })
     get().addLog(`${name} wakes up on day 1 with ${formatInr(STARTING_MONEY)} to their name, ready to start their working life.`)
     // v0.24 fix: this used to complete "Get Your Bearings" right here, the
     // instant a name was typed in -- before the player had done anything at
@@ -1255,7 +1248,6 @@ export const useGameStore = create<GameState>()(
       _readingBookId: null,
       contacts: {},
       residentOverrides: {},
-      residentChats: {},
       quests: QUEST_DEFS.map((q) => ({ ...q, completed: false })),
       everOvercommitted: false,
       assistantOpen: false,
@@ -1830,10 +1822,6 @@ Outcome: ${option.outcome}`
 
   setResidentOverride: (id, override) => {
     set({ residentOverrides: { ...get().residentOverrides, [id]: override } })
-  },
-
-  setResidentChat: (id, messages) => {
-    set({ residentChats: { ...get().residentChats, [id]: messages.slice(-40) } })
   },
 
   openAssistant: () => set({ assistantOpen: true }),
