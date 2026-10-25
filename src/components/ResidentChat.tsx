@@ -21,6 +21,12 @@ function trace(kind: string, said: string, system: string, raw: string, result: 
   console.groupEnd()
 }
 
+/** With a local model connected the chat simply waits for it -- slow
+ *  replies are normal on a small Mac -- and the player can press "Stop
+ *  waiting" instead (see `stopWaiting`). This cap only catches a request
+ *  that will never come back; it matches the bridge's own 5-minute limit. */
+const MODEL_WAIT_MS = 300000
+
 function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout: T): Promise<T> {
   return new Promise(resolve => {
     const timer = setTimeout(() => resolve(onTimeout), ms)
@@ -53,7 +59,7 @@ export function ResidentChat({ person, onClose, onEnter, onExit }: { person: Res
     if (!registered.current) { registered.current = true; const r = person.resident; useGameStore.getState().meetResident(r.id, r.name, r.role) }
     const greeting = person.action === 'sleeping'
       ? `*yawns, rubbing their eyes* Mmph... what is it? I was asleep.`
-      : residentReply(person, 'hello', alreadyMet.current)
+      : residentReply(person, 'hello', alreadyMet.current, false, context().player)
     setMessages(old => old.length ? old : [{ role: 'assistant', content: greeting }])
     return () => { serial.current++ }
   }, [asleep])
@@ -61,9 +67,19 @@ export function ResidentChat({ person, onClose, onEnter, onExit }: { person: Res
   const clearChat = () => {
     serial.current++; setBusy(false); setNotice(''); setDraft('')
     useGameStore.getState().forgetPlayer(person.resident.id)
-    setMessages([{ role: 'assistant', content: residentReply(person, 'hello', true) }])
+    setMessages([{ role: 'assistant', content: residentReply(person, 'hello', true, false, context().player) }])
   }
   useEffect(() => { end.current?.scrollIntoView({ block: 'nearest' }) }, [messages, busy])
+  // Seconds spent waiting on the model, shown next to "Thinking…".
+  const [waited, setWaited] = useState(0)
+  useEffect(() => {
+    if (!busy) { setWaited(0); return }
+    const started = Date.now(), id = setInterval(() => setWaited(Math.floor((Date.now() - started) / 1000)), 1000)
+    return () => clearInterval(id)
+  }, [busy])
+  // Give up on the pending reply (the request is simply ignored when it
+  // lands, same as closing the chat). Their message stays; nothing happens.
+  const stopWaiting = () => { serial.current++; setBusy(false); setNotice(`${person.resident.name} seems lost in thought. Try saying it again.`) }
   const groggy = person.action === 'sleeping' && woke
   const known = useGameStore(s => s.residentKnowledge[person.resident.id])
   const context = (): ChatContext => {
@@ -115,7 +131,7 @@ export function ResidentChat({ person, onClose, onEnter, onExit }: { person: Res
     setMessages(next); setDraft(''); setBusy(true); setNotice('')
     const ctx = context()
     const ip = intentPrompt(person, options, ctx), transcript = intentTranscript(person, next, ctx)
-    const raw = await withTimeout(generateJSON(ip, transcript, 160, { schema: intentSchema(options), temperature: 0.2 }), 15000, null)
+    const raw = await withTimeout(generateJSON(ip, transcript, 160, { schema: intentSchema(options), temperature: 0.2 }), MODEL_WAIT_MS, null)
     if (id !== serial.current) return
     const intent = parseIntent(raw, options) ?? keywordIntent(said)
     if (intent.learned) useGameStore.getState().learnAboutPlayer(person.resident.id, intent.learned)
@@ -148,7 +164,7 @@ export function ResidentChat({ person, onClose, onEnter, onExit }: { person: Res
     // The model sees the neighbour's words plus the unseen scene note; the log keeps only the words.
     const sent = note ? [...next.slice(0, -1), { role: 'user' as const, content: said + note }] : next
     const system = residentPrompt(person, ctx, groggy)
-    const reply = await withTimeout(conversationReply(system, sent, fallback), 20000, { text: fallback, notice: 'That took too long. Showing an offline reply.' })
+    const reply = await withTimeout(conversationReply(system, sent, fallback), MODEL_WAIT_MS, { text: fallback, notice: 'No reply after 5 minutes. Showing an offline reply.' })
     if (id !== serial.current) return
     const outcome = intent.stop && chosen ? `stop -> ${chosen.label}` : chosen && chosen === intent.picked && !intent.action ? `picked -> ${chosen.label}` : chosen ? `do -> ${chosen.label}${intent.untilStop ? ' (until stop)' : ''}` : intent.action ? `declined ${intent.action.label}` : 'nothing asked'
     trace('intent', said, ip + '\n\n--- transcript ---\n' + transcript, raw ? JSON.stringify(raw) : '(no model / failed -> keyword matcher)', outcome + (intent.learned ? ` | learned: ${intent.learned}` : ''))
@@ -164,7 +180,7 @@ export function ResidentChat({ person, onClose, onEnter, onExit }: { person: Res
     setMessages(next); setDraft(''); setBusy(true); setNotice('')
     const fallback = (groggy ? '*still half-asleep* ' : '') + residentReply(person, text, alreadyMet.current, groggy)
     const system = residentPrompt(person, context(), groggy)
-    const reply = await withTimeout(conversationReply(system, next, fallback), 20000, { text: fallback, notice: 'That took too long. Showing an offline reply.' })
+    const reply = await withTimeout(conversationReply(system, next, fallback), MODEL_WAIT_MS, { text: fallback, notice: 'No reply after 5 minutes. Showing an offline reply.' })
     if (id !== serial.current) return
     trace('chat', said, system, reply.text, 'not a pinned resident')
     setMessages([...next, { role: 'assistant', content: cleanReply(reply.text) }]); setNotice(reply.notice); setBusy(false)
@@ -185,7 +201,7 @@ export function ResidentChat({ person, onClose, onEnter, onExit }: { person: Res
   return <aside className="resident-chat" role="dialog" aria-label={`Talk to ${person.resident.name}`} onKeyDown={e => { if (e.key === 'Escape') onClose() }}>
     <div className="resident-portrait-wrap"><ResidentPortrait resident={person.resident} /></div>
     <header><div><h2>{person.resident.name} <span>· {person.resident.role}</span></h2><p>{person.activity} <span className="activity-tag">{person.action}</span></p></div><button className="resident-chat-clear" disabled={messages.length < 2 && !known?.length} title={known?.length ? `Start over -- ${person.resident.name} also forgets what you've told them (${known.length})` : 'Start this conversation over'} onClick={clearChat}>Clear</button><button aria-label="Close conversation" onClick={onClose}>×</button></header>
-    <div className="resident-messages" aria-live="polite">{messages.map((m, i) => <p key={i} className={m.role}><ChatText text={m.content} /></p>)}{busy && <p>Thinking…</p>}<div ref={end}/></div>
+    <div className="resident-messages" aria-live="polite">{messages.map((m, i) => <p key={i} className={m.role}><ChatText text={m.content} /></p>)}{busy && <p className="resident-thinking">Thinking…{waited >= 3 && <span> {waited}s</span>}{waited >= 5 && <button type="button" onClick={stopWaiting}>Stop waiting</button>}</p>}<div ref={end}/></div>
     {notice && <p className="conversation-notice" role="status">{notice}</p>}
     <div className="conversation-topics">{TALK_TOPICS.map(topic => <button key={topic} disabled={busy} onClick={() => void send(topic)}>{topic}</button>)}</div>
     {isPinned && <div className="conversation-topics">

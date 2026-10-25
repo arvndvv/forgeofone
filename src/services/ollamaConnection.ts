@@ -64,14 +64,19 @@ export async function ollamaChat(payload: ChatPayload): ReturnType<Bridge['chat'
     const numPredict = Math.min(800, Math.max(60, payload.maxTokens ?? 180))
     const temperature = Number.isFinite(payload.temperature) ? Math.min(1.2, Math.max(0, payload.temperature!)) : 0.65
     const response = await fetch(`${LOCAL_URL}/api/chat`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(45000),
+      // Generous: a small Mac can take a while, especially loading the model
+      // for the first message. The chat waits (with a "Stop waiting" button);
+      // this cap only catches an Ollama that has hung outright.
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(300000),
       body: JSON.stringify({
         model: payload.model, messages: payload.messages, stream: false,
         ...(/qwen3/i.test(payload.model) ? { think: false } : {}),
         // A JSON schema (Ollama structured outputs, 0.5+) constrains the reply
         // to exactly that shape; plain json mode only guarantees valid JSON.
         ...(payload.schema ? { format: payload.schema } : payload.json ? { format: 'json' } : {}),
-        keep_alive: '2m', options: { num_predict: numPredict, num_ctx: 4096, temperature },
+        // Keep the model loaded between messages and chats -- reloading it
+        // was most of the wait on each new message.
+        keep_alive: '30m', options: { num_predict: numPredict, num_ctx: 4096, temperature },
       }),
     })
     if (!response.ok) throw Error('The local model could not complete that reply.')
