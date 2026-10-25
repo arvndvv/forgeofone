@@ -745,6 +745,15 @@ interface GameState {
   // Keyed by resident.id -- small enough it rides along in the autosave too.
   residentOverrides: Record<string, ResidentOverride>
   setResidentOverride: (id: string, override: ResidentOverride) => void
+  /** What each resident has learned about the player this session --
+   *  short facts the player shared in conversation ("works as a software
+   *  engineer"), picked out by the chat's intent step. Keyed by
+   *  resident.id; fed into that resident's prompts so replies can use it.
+   *  Session only (like contacts); the chat's Clear button wipes one
+   *  resident's list. Capped at 12 facts per resident. */
+  residentKnowledge: Record<string, string[]>
+  learnAboutPlayer: (id: string, fact: string) => void
+  forgetPlayer: (id: string) => void
 
   // onboarding / quest system
   quests: Quest[]
@@ -1166,6 +1175,7 @@ export const useGameStore = create<GameState>()(
   _readingBookId: null,
   contacts: {},
   residentOverrides: {},
+  residentKnowledge: {},
 
   quests: QUEST_DEFS.map((q) => ({ ...q, completed: false })),
   everOvercommitted: false,
@@ -1183,7 +1193,7 @@ export const useGameStore = create<GameState>()(
 
   createCharacter: (name) => {
     miraRequest++
-    set({ playerName: name, playerX: 0, playerY: 0, playerFacing: 'south', worldSeed: Math.floor(Math.random() * 1_000_000), discoveries: {}, inventory: [], bookShopStock: STATIC_BOOKS.slice(), library: [], contacts: {}, residentOverrides: {}, miraThinking: false, miraNotice: '' })
+    set({ playerName: name, playerX: 0, playerY: 0, playerFacing: 'south', worldSeed: Math.floor(Math.random() * 1_000_000), discoveries: {}, inventory: [], bookShopStock: STATIC_BOOKS.slice(), library: [], contacts: {}, residentOverrides: {}, residentKnowledge: {}, miraThinking: false, miraNotice: '' })
     get().addLog(`${name} wakes up on day 1 with ${formatInr(STARTING_MONEY)} to their name, ready to start their working life.`)
     // v0.24 fix: this used to complete "Get Your Bearings" right here, the
     // instant a name was typed in -- before the player had done anything at
@@ -1248,6 +1258,7 @@ export const useGameStore = create<GameState>()(
       _readingBookId: null,
       contacts: {},
       residentOverrides: {},
+      residentKnowledge: {},
       quests: QUEST_DEFS.map((q) => ({ ...q, completed: false })),
       everOvercommitted: false,
       assistantOpen: false,
@@ -1822,6 +1833,18 @@ Outcome: ${option.outcome}`
 
   setResidentOverride: (id, override) => {
     set({ residentOverrides: { ...get().residentOverrides, [id]: override } })
+  },
+
+  learnAboutPlayer: (id, fact) => {
+    const known = get().residentKnowledge[id] ?? []
+    const key = fact.toLowerCase()
+    if (known.some(k => k.toLowerCase() === key || k.toLowerCase().includes(key) || key.includes(k.toLowerCase()))) return
+    set({ residentKnowledge: { ...get().residentKnowledge, [id]: [...known, fact].slice(-12) } })
+  },
+
+  forgetPlayer: (id) => {
+    const { [id]: _gone, ...rest } = get().residentKnowledge
+    set({ residentKnowledge: rest })
   },
 
   openAssistant: () => set({ assistantOpen: true }),

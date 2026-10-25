@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useGameStore } from '../store/gameStore'
 import { conversationReply, generateJSON, useLocalAI } from '../services/localAI'
-import { residentReply, residentPrompt, TALK_TOPICS, chatActions, requestedActions, intentPrompt, intentTranscript, intentSchema, parseIntent, outcomeNote, cleanReply, type ChatAction, type ChatIntent } from '../world/conversations'
+import { residentReply, residentPrompt, TALK_TOPICS, chatActions, requestedActions, intentPrompt, intentTranscript, intentSchema, parseIntent, outcomeNote, cleanReply, type ChatAction, type ChatIntent, type ChatContext } from '../world/conversations'
 import type { ResidentPosition } from '../world/residents'
 import { ResidentPortrait } from './ResidentPortrait'
 import { ChatText } from './ChatText'
@@ -57,12 +57,19 @@ export function ResidentChat({ person, onClose, onEnter, onExit }: { person: Res
     setMessages(old => old.length ? old : [{ role: 'assistant', content: greeting }])
     return () => { serial.current++ }
   }, [asleep])
+  // Clear starts the conversation over AND makes them forget what you told them.
   const clearChat = () => {
     serial.current++; setBusy(false); setNotice(''); setDraft('')
+    useGameStore.getState().forgetPlayer(person.resident.id)
     setMessages([{ role: 'assistant', content: residentReply(person, 'hello', true) }])
   }
   useEffect(() => { end.current?.scrollIntoView({ block: 'nearest' }) }, [messages, busy])
   const groggy = person.action === 'sleeping' && woke
+  const known = useGameStore(s => s.residentKnowledge[person.resident.id])
+  const context = (): ChatContext => {
+    const st = useGameStore.getState()
+    return { player: st.playerName?.trim() || 'your neighbour', known: st.residentKnowledge[person.resident.id] ?? [], meetings: st.contacts[person.resident.id]?.meetings ?? 0, hour: st.hour }
+  }
   const isPinned = !!person.resident.outdoorActivities?.length
   const inside = !person.visible
   // Same side of the door first: when a request fits both ("read a book"),
@@ -106,10 +113,13 @@ export function ResidentChat({ person, onClose, onEnter, onExit }: { person: Res
   const talk = async (said: string, fromButton = false) => {
     const next = [...messages, { role: 'user' as const, content: said }].slice(-16), id = ++serial.current
     setMessages(next); setDraft(''); setBusy(true); setNotice('')
-    const ip = intentPrompt(person, options), transcript = intentTranscript(person, next)
+    const ctx = context()
+    const ip = intentPrompt(person, options, ctx), transcript = intentTranscript(person, next, ctx)
     const raw = await withTimeout(generateJSON(ip, transcript, 160, { schema: intentSchema(options), temperature: 0.2 }), 15000, null)
     if (id !== serial.current) return
     const intent = parseIntent(raw, options) ?? keywordIntent(said)
+    if (intent.learned) useGameStore.getState().learnAboutPlayer(person.resident.id, intent.learned)
+    if (intent.learned) ctx.known = useGameStore.getState().residentKnowledge[person.resident.id] ?? ctx.known
     if (fromButton && !intent.action && !intent.picked) {
       const here = options.filter(o => o.indoors === inside && o.action !== 'sleeping')
       intent.picked = here[Math.floor(Math.random() * here.length)]
@@ -120,28 +130,28 @@ export function ResidentChat({ person, onClose, onEnter, onExit }: { person: Res
       // teleports them out of the room you're both standing in.
       const here = options.filter(o => o.indoors === inside && o.action !== 'sleeping')
       chosen = here[Math.floor(Math.random() * here.length)]
-      if (chosen) { note = outcomeNote(person, { kind: 'stop', action: chosen }); fallback = `*stops and stretches* Alright, that's enough of that.` }
+      if (chosen) { note = outcomeNote(person, ctx, { kind: 'stop', action: chosen }); fallback = `*stops and stretches* Alright, that's enough of that.` }
     } else if (intent.action && intent.agree) {
       chosen = intent.action
-      note = outcomeNote(person, { kind: 'agree', action: chosen, untilStop: intent.untilStop })
+      note = outcomeNote(person, ctx, { kind: 'agree', action: chosen, untilStop: intent.untilStop })
       fallback = chosen.indoors && !inside ? '*opens the door* Sure, come on in.' : !chosen.indoors && inside ? '*heads for the door* Good idea, let’s step out.' : `*${chosen.label.charAt(0).toLowerCase() + chosen.label.slice(1)}* Alright, why not.`
     } else if (intent.action) {
-      note = outcomeNote(person, { kind: 'decline', action: intent.action, reason: intent.reason })
+      note = outcomeNote(person, ctx, { kind: 'decline', action: intent.action, reason: intent.reason })
       fallback = intent.reason ? `Not just yet, friend -- ${intent.reason.charAt(0).toLowerCase() + intent.reason.slice(1)}` : '*glances back at what they were doing* Not just yet, friend. Give me a little while.'
     } else if (intent.picked) {
       chosen = intent.picked
-      note = outcomeNote(person, { kind: 'pick', action: chosen })
+      note = outcomeNote(person, ctx, { kind: 'pick', action: chosen })
       fallback = `*thinks for a moment* I think I'll get on with ${chosen.label.charAt(0).toLowerCase() + chosen.label.slice(1)}.`
     }
     pending.current = intent.action && !intent.agree ? [intent.action] : null
     if (!fallback) fallback = (groggy ? '*still half-asleep* ' : '') + residentReply(person, said, alreadyMet.current, groggy)
     // The model sees the neighbour's words plus the unseen scene note; the log keeps only the words.
     const sent = note ? [...next.slice(0, -1), { role: 'user' as const, content: said + note }] : next
-    const system = residentPrompt(person, groggy)
+    const system = residentPrompt(person, ctx, groggy)
     const reply = await withTimeout(conversationReply(system, sent, fallback), 20000, { text: fallback, notice: 'That took too long. Showing an offline reply.' })
     if (id !== serial.current) return
     const outcome = intent.stop && chosen ? `stop -> ${chosen.label}` : chosen && chosen === intent.picked && !intent.action ? `picked -> ${chosen.label}` : chosen ? `do -> ${chosen.label}${intent.untilStop ? ' (until stop)' : ''}` : intent.action ? `declined ${intent.action.label}` : 'nothing asked'
-    trace('intent', said, ip + '\n\n--- transcript ---\n' + transcript, raw ? JSON.stringify(raw) : '(no model / failed -> keyword matcher)', outcome)
+    trace('intent', said, ip + '\n\n--- transcript ---\n' + transcript, raw ? JSON.stringify(raw) : '(no model / failed -> keyword matcher)', outcome + (intent.learned ? ` | learned: ${intent.learned}` : ''))
     trace('reply', said, system + (note ? '\n\n[appended to message]' + note : ''), reply.text, outcome)
     setMessages([...next, { role: 'assistant', content: cleanReply(reply.text) }]); setNotice(reply.notice); setBusy(false)
     if (chosen) apply(chosen, !!intent.untilStop && !intent.stop)
@@ -153,7 +163,7 @@ export function ResidentChat({ person, onClose, onEnter, onExit }: { person: Res
     const next = [...messages, { role: 'user' as const, content: said }].slice(-16), id = ++serial.current
     setMessages(next); setDraft(''); setBusy(true); setNotice('')
     const fallback = (groggy ? '*still half-asleep* ' : '') + residentReply(person, text, alreadyMet.current, groggy)
-    const system = residentPrompt(person, groggy)
+    const system = residentPrompt(person, context(), groggy)
     const reply = await withTimeout(conversationReply(system, next, fallback), 20000, { text: fallback, notice: 'That took too long. Showing an offline reply.' })
     if (id !== serial.current) return
     trace('chat', said, system, reply.text, 'not a pinned resident')
@@ -174,7 +184,7 @@ export function ResidentChat({ person, onClose, onEnter, onExit }: { person: Res
   }
   return <aside className="resident-chat" role="dialog" aria-label={`Talk to ${person.resident.name}`} onKeyDown={e => { if (e.key === 'Escape') onClose() }}>
     <div className="resident-portrait-wrap"><ResidentPortrait resident={person.resident} /></div>
-    <header><div><h2>{person.resident.name} <span>· {person.resident.role}</span></h2><p>{person.activity} <span className="activity-tag">{person.action}</span></p></div><button className="resident-chat-clear" disabled={messages.length < 2} title="Start this conversation over" onClick={clearChat}>Clear</button><button aria-label="Close conversation" onClick={onClose}>×</button></header>
+    <header><div><h2>{person.resident.name} <span>· {person.resident.role}</span></h2><p>{person.activity} <span className="activity-tag">{person.action}</span></p></div><button className="resident-chat-clear" disabled={messages.length < 2 && !known?.length} title={known?.length ? `Start over -- ${person.resident.name} also forgets what you've told them (${known.length})` : 'Start this conversation over'} onClick={clearChat}>Clear</button><button aria-label="Close conversation" onClick={onClose}>×</button></header>
     <div className="resident-messages" aria-live="polite">{messages.map((m, i) => <p key={i} className={m.role}><ChatText text={m.content} /></p>)}{busy && <p>Thinking…</p>}<div ref={end}/></div>
     {notice && <p className="conversation-notice" role="status">{notice}</p>}
     <div className="conversation-topics">{TALK_TOPICS.map(topic => <button key={topic} disabled={busy} onClick={() => void send(topic)}>{topic}</button>)}</div>

@@ -64,7 +64,7 @@ export interface Resident {
    *  position from (resident, simMinutes, override) alone, with no need to
    *  look the PinnedResident config back up. See pinnedResidentPosition(). */
   post?: Point
-  outdoorActivities?: Array<{ action: Activity; label: string }>
+  outdoorActivities?: Array<{ action: Activity; label: string; description?: string }>
   indoorActivities?: IndoorActivity[]
   indoorShare?: number
   bucketMinutes?: number
@@ -124,9 +124,12 @@ export interface PinnedResident {
    *  `portrait` below are set, so it's never wasted to leave it accurate. */
   sprite: number
   /** Pool of things they might be doing outdoors, at their post. The
-   *  ambient system (and "what will you do next?") picks one at random --
-   *  list a few for variety, or just one to keep them doing the same thing. */
-  outdoorActivities: Array<{ action: Activity; label: string }>
+   *  ambient system picks one at random -- list a few for variety, or just
+   *  one to keep them doing the same thing. Each one can also be asked for
+   *  in chat. `label` is the short text shown in the UI; `description`
+   *  (optional, recommended) says what it actually is in a sentence, which
+   *  the local model uses to understand and describe the option. */
+  outdoorActivities: Array<{ action: Activity; label: string; description?: string }>
   /** Pool of things they might be doing indoors, shown in HomeInterior.tsx.
    *  Also picked at random, same as outdoorActivities. Leave unset (or
    *  empty) to keep this character outdoors all day and skip "go inside"
@@ -163,10 +166,13 @@ export const PINNED_RESIDENTS: Record<string, PinnedResident[]> = {
     personality: 'Warm, unhurried and a little nostalgic. Calls people "friend", loves telling stories about the old trade routes, and gently teases young folk who rush. Enjoys company and rarely turns a visitor away. Speaks plainly, with the odd shopkeeper saying.',
     expertise: ['negotiation', 'personal-finance'],
     col: 0, row: 0, sprite: 9,
+    // label: short, shown in the UI. description: what it actually is --
+    // the local model reads it to understand the option (and to describe
+    // it when it happens), so a sentence of concrete detail helps.
     outdoorActivities: [
-      { action: 'chatting', label: 'Sitting outside, happy to talk' },
-      { action: 'reading', label: 'Reading the paper on the porch' },
-      { action: 'gardening', label: 'Tending the small flower bed out front' },
+      { action: 'chatting', label: 'Sitting outside, happy to talk', description: 'Tam sits on the bench by his front door, watching the lane and greeting whoever passes.' },
+      { action: 'reading', label: 'Reading the paper on the porch', description: 'Tam reads the local news sheet on the porch, reading bits aloud and grumbling about prices.' },
+      { action: 'gardening', label: 'Tending the small flower bed out front', description: 'Tam kneels by the flower bed beside the door, pulling weeds and watering the marigolds.' },
     ],
     indoorActivities: [
       { action: 'resting', scene: 'resting', label: 'Resting by the fire', description: 'Tam is settled into a worn armchair by the fire.' },

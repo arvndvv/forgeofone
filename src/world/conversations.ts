@@ -25,12 +25,27 @@ export function residentReply(person: ResidentPosition, question: string, metBef
  *  comes too); an outdoor option while inside means "head back out". So
  *  adding an activity to a PINNED_RESIDENTS entry automatically makes it
  *  reachable by chat -- no extra wiring per action. */
-export interface ChatAction { label: string; indoors: boolean; action: Activity; scene?: SceneKind; description?: string }
+export interface ChatAction { label: string; indoors: boolean; action: Activity; scene?: SceneKind; description?: string; about?: string }
+
+/** Who the resident is talking to and what they know about them -- built
+ *  by ResidentChat from the store and passed into every prompt below so
+ *  replies can use the player's name and what they've shared. */
+export interface ChatContext {
+  /** The player's name ("your neighbour" if they haven't set one). */
+  player: string
+  /** Things the player has told this resident about themself this session
+   *  (see the intent step's `learned` field and gameStore.residentKnowledge). */
+  known: string[]
+  /** How many conversations they've had before this one (contacts). */
+  meetings: number
+  /** In-game hour, 0-23. */
+  hour: number
+}
 
 export function chatActions(person: ResidentPosition): ChatAction[] {
   const r = person.resident
-  const out = (r.outdoorActivities ?? []).map(a => ({ label: a.label, indoors: false, action: a.action }))
-  const ins = (r.indoorActivities ?? []).map(a => ({ label: a.label, indoors: true, action: a.action, scene: a.scene, description: a.description }))
+  const out = (r.outdoorActivities ?? []).map(a => ({ label: a.label, indoors: false, action: a.action, about: a.description }))
+  const ins = (r.indoorActivities ?? []).map(a => ({ label: a.label, indoors: true, action: a.action, scene: a.scene, description: a.description, about: a.description }))
   // Everything except exactly what they're doing right now.
   return [...out, ...ins].filter(a => !(a.label === person.activity && a.indoors === !person.visible))
 }
@@ -78,43 +93,74 @@ export function requestedActions(text: string, person: ResidentPosition): ChatAc
   return undefined
 }
 
-/** What the neighbour's latest message means for a pinned resident -- the
+/** Shared scene wording, so every prompt says exactly whose place this
+ *  is and where both people are. A resident without an indoor pool (a
+ *  hired worker, an expert) is simply "at" their workplace. */
+function sceneFor(person: ResidentPosition, ctx: ChatContext, voice: 'second' | 'third') {
+  const r = person.resident, inside = !person.visible, p = ctx.player
+  const hasHome = !!r.indoorActivities?.length
+  const own = voice === 'second' ? 'your own home' : `${r.name}'s own home`
+  const subject = voice === 'second' ? 'You are' : `${r.name} is`
+  if (!hasHome) return `${subject} at ${r.workplace} in ${r.town}, with ${p}.`
+  return inside
+    ? `${subject} inside ${own} (${r.workplace}, ${r.town}); ${p} is there too, as a guest.`
+    : `${subject} outside, by the front door of ${own} (${r.workplace}, ${r.town}); ${p} is standing there with ${voice === 'second' ? 'you' : r.name}.`
+}
+
+const timeOfDay = (hour: number) => hour < 5 ? 'late at night' : hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : hour < 21 ? 'evening' : 'night'
+const lower = (t: string) => t.charAt(0).toLowerCase() + t.slice(1)
+/** A description as an aside: original case (they're written "Tam is ..."), no trailing full stop. */
+const aside = (t?: string) => t ? t.trim().replace(/[.\s]+$/, '') : ''
+
+/** One line per option for the intent step: what it is, and whether
+ *  choosing it means staying put or both of them going through the door. */
+function optionLine(a: ChatAction, i: number, person: ResidentPosition, ctx: ChatContext) {
+  const r = person.resident, inside = !person.visible
+  const where = a.indoors === inside
+    ? (inside ? `stays inside ${r.name}'s home` : `stays outside ${r.name}'s home`)
+    : a.indoors ? `${r.name} and ${ctx.player} go inside ${r.name}'s home together` : `${r.name} and ${ctx.player} go out the front door together`
+  return `${i + 1}. ${a.label}${a.about ? ` -- ${aside(a.about)}` : ''} [${where}]`
+}
+
+/** What the player's latest message means for a pinned resident -- the
  *  result of the intent step (intentPrompt -> parseIntent) when a model is
  *  connected, or of the keyword matcher (requestedActions) offline. */
-export interface ChatIntent { action?: ChatAction; agree: boolean; reason: string; untilStop: boolean; stop: boolean; picked?: ChatAction }
+export interface ChatIntent { action?: ChatAction; agree: boolean; reason: string; untilStop: boolean; stop: boolean; picked?: ChatAction; learned?: string }
 
 /** Intent step, run before every reply to a pinned resident when a local
  *  model is connected. The model reads the conversation and picks a NUMBER
- *  from the resident's real options -- small models do that far more
- *  reliably than copying labels or remembering a reply format -- so any
- *  phrasing works ("may be read a book", "now please", "till I say stop")
- *  without keyword lists. JSON mode, short, never shown to the player. */
-export function intentPrompt(person: ResidentPosition, options: ChatAction[]): string {
-  const r = person.resident, inside = !person.visible
-  const where = (a: ChatAction) => a.indoors === inside ? (inside ? 'stay inside' : 'stay outside') : a.indoors ? 'go inside together' : 'go outside together'
+ *  from the resident's real options (constrained by intentSchema), so any
+ *  phrasing works without keyword lists. JSON only, never shown. Also
+ *  extracts anything lasting the player shared about themself (`learned`). */
+export function intentPrompt(person: ResidentPosition, options: ChatAction[], ctx: ChatContext): string {
+  const r = person.resident, p = ctx.player
   return [
-    `You decide what happens next in a conversation between ${r.name} (${r.role.toLowerCase()}) and a neighbour.`,
-    r.personality ?? '',
-    `Right now ${r.name} is ${inside ? 'inside at home' : 'outside their home'}: ${person.activity}.`,
-    `Things ${r.name} could do:`,
-    ...options.map((a, i) => `${i + 1}. ${a.label} (${where(a)})`),
-    `Read the conversation, especially the neighbour's LATEST message, and answer with JSON only:`,
-    `{"asked": <number of the thing the neighbour wants ${r.name} to do now -- also when they insist again ("now please") or say yes to ${r.name}'s own suggestion; 0 if they are not asking for any of these>,`,
-    ` "agree": <true if ${r.name} goes along with it; ${r.name} usually agrees unless there is a real reason>,`,
-    ` "reason": "<short reason if not agreeing, else empty>",`,
-    ` "untilStop": <true if they want it kept up until they say stop>,`,
-    ` "stop": <true if they are telling ${r.name} to stop what they are doing>,`,
-    ` "picks": <only if the neighbour asks what ${r.name} will do next, or tells ${r.name} to choose: the number ${r.name} picks for themself; otherwise 0>}`,
-  ].filter(Boolean).join('\n')
+    `You decide what happens next in a conversation between ${r.name} and ${p}.`,
+    `About ${r.name}: ${r.role.toLowerCase()} in ${r.town}. ${r.personality ?? ''}`.trim(),
+    `Where they are: ${sceneFor(person, ctx, 'third')} It is ${timeOfDay(ctx.hour)}.`,
+    `What ${r.name} is doing right now: ${person.activity}${person.description && !person.visible ? ` -- ${aside(person.description)}` : ''}.`,
+    ctx.known.length ? `What ${r.name} knows about ${p}: ${ctx.known.join('; ')}.` : '',
+    ``,
+    `Things ${r.name} could do next:`,
+    ...options.map((a, i) => optionLine(a, i, person, ctx)),
+    ``,
+    `Read the conversation, especially ${p}'s LATEST message, and fill in:`,
+    `- asked: the number of the thing ${p} wants ${r.name} to do now. Count it however it is worded, when ${p} insists again after a no ("now please"), or when ${p} says yes to something ${r.name} suggested. 0 if ${p} is not asking for one of these.`,
+    `- agree: would ${r.name} go along with it, given who ${r.name} is and the moment? ${r.name} usually agrees unless there is a real reason.`,
+    `- reason: if agree is false, ${r.name}'s short reason in a few words; otherwise "".`,
+    `- untilStop: true if ${p} wants ${r.name} to keep at it until told to stop.`,
+    `- stop: true if ${p} is telling ${r.name} to stop what ${r.name} is doing right now.`,
+    `- picks: only when ${p} asks what ${r.name} will do next, or tells ${r.name} to choose: the number ${r.name} picks. Otherwise 0.`,
+    `- learned: a new, lasting fact ${p} just shared about themself (job, family, where they're from, likes, plans), in a few words, e.g. "works as a software engineer". Not requests, not what is happening right now, nothing already known. "" if none.`,
+    `Answer with JSON only.`,
+  ].filter((l, i, all) => l !== '' || all[i - 1] !== '').join('\n')
 }
-
 /** The conversation as plain lines for intentPrompt's user message. */
-export function intentTranscript(person: ResidentPosition, messages: Array<{ role: 'user' | 'assistant'; content: string }>): string {
-  const lines = messages.slice(-8).map(m => `${m.role === 'user' ? 'Neighbour' : person.resident.name}: ${m.content.replace(/\s+/g, ' ').slice(0, 300)}`)
+export function intentTranscript(person: ResidentPosition, messages: Array<{ role: 'user' | 'assistant'; content: string }>, ctx: ChatContext): string {
+  const lines = messages.slice(-8).map(m => `${m.role === 'user' ? ctx.player : person.resident.name}: ${m.content.replace(/\s+/g, ' ').slice(0, 300)}`)
   if (lines.length) lines[lines.length - 1] += '   <- LATEST'
   return lines.join('\n')
 }
-
 export function parseIntent(raw: unknown, options: ChatAction[]): ChatIntent | undefined {
   if (!raw || typeof raw !== 'object') return undefined
   const o = raw as Record<string, unknown>
@@ -123,7 +169,8 @@ export function parseIntent(raw: unknown, options: ChatAction[]): ChatIntent | u
   const action = Number.isInteger(n) && n >= 1 && n <= options.length ? options[n - 1] : undefined
   const p = Number(o.picks)
   const picked = Number.isInteger(p) && p >= 1 && p <= options.length ? options[p - 1] : undefined
-  return { action, agree: flag(o.agree, true), reason: typeof o.reason === 'string' ? o.reason.slice(0, 160) : '', untilStop: flag(o.untilStop, false), stop: flag(o.stop, false), picked }
+  const learned = typeof o.learned === 'string' && o.learned.trim().length > 2 ? o.learned.trim().replace(/\.$/, '').slice(0, 120) : undefined
+  return { action, agree: flag(o.agree, true), reason: typeof o.reason === 'string' ? o.reason.slice(0, 160) : '', untilStop: flag(o.untilStop, false), stop: flag(o.stop, false), picked, learned }
 }
 
 /** JSON schema for the intent step (Ollama structured outputs): the option
@@ -140,28 +187,29 @@ export function intentSchema(options: ChatAction[]): Record<string, unknown> {
       untilStop: { type: 'boolean' },
       stop: { type: 'boolean' },
       picks: { type: 'integer', enum: numbers },
+      learned: { type: 'string' },
     },
-    required: ['asked', 'agree', 'reason', 'untilStop', 'stop', 'picks'],
+    required: ['asked', 'agree', 'reason', 'untilStop', 'stop', 'picks', 'learned'],
   }
 }
 
-/** Scene note appended (unseen) to the neighbour's message for the reply
+/** Scene note appended (unseen) to the player's message for the reply
  *  step, so what the resident SAYS matches what the intent step decided
- *  they DO. Empty when nothing was asked. */
-export function outcomeNote(person: ResidentPosition, outcome: { kind: 'agree' | 'decline' | 'stop' | 'pick'; action: ChatAction; reason?: string; untilStop?: boolean }): string {
-  const inside = !person.visible, a = outcome.action
-  const doing = a.label.charAt(0).toLowerCase() + a.label.slice(1)
+ *  they DO. */
+export function outcomeNote(person: ResidentPosition, ctx: ChatContext, outcome: { kind: 'agree' | 'decline' | 'stop' | 'pick'; action: ChatAction; reason?: string; untilStop?: boolean }): string {
+  const inside = !person.visible, a = outcome.action, p = ctx.player
+  const doing = lower(a.label) + (a.about ? ` (${aside(a.about)})` : '')
   let what: string
-  if (outcome.kind === 'decline') what = `you'd rather not do that right now${outcome.reason ? ` (${outcome.reason})` : ''}. Say so kindly, in your own way`
+  if (outcome.kind === 'decline') what = `${p} asked you to do something -- ${doing} -- but you'd rather not right now${outcome.reason ? ` (${outcome.reason})` : ''}. Say so kindly, in your own way`
   else {
-    const verb = outcome.kind === 'stop' ? 'stop and switch to' : outcome.kind === 'pick' ? 'decide to get on with' : 'agree and start'
     const lead = outcome.kind === 'pick' ? 'you decide to' : 'you agree and'
-    const move = a.indoors === inside ? `you ${verb}: ${doing}` : a.indoors ? `${lead} go inside your home, where you'll be ${doing}` : `${lead} head out the door; outside you'll be ${doing}`
-    what = `${move}${outcome.untilStop ? ", and you'll keep at it until they tell you to stop" : ''}. Show what you do in *asterisks*`
+    const move = a.indoors === inside
+      ? `${outcome.kind === 'stop' ? 'you stop what you were doing and switch to' : outcome.kind === 'pick' ? 'you decide to get on with' : 'you agree and start'}: ${doing}`
+      : a.indoors ? `${lead} take ${p} inside your home with you, where you'll be ${doing}` : `${lead} head out the front door with ${p}; outside you'll be ${doing}`
+    what = `${move}${outcome.untilStop ? `, and you'll keep at it until ${p} tells you to stop` : ''}. Show what you do in *asterisks*`
   }
   return `\n\n[Scene note, not said aloud: ${what}. Reply as yourself in 1-2 short sentences. Don't start with yes or no.]`
 }
-
 /** A reply ready for the chat log: leaked tags removed, plus any leading
  *  bare "YES"/"No." decision word the model added anyway. */
 export function cleanReply(text: string): string {
@@ -191,30 +239,32 @@ export function stripTags(text: string): { text: string; tags: string[] } {
   return { text: clean.replace(/[ \t]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim(), tags }
 }
 
-/** The character sheet every resident prompt starts from. Written entirely
+/** The character sheet every resident reply starts from. Written entirely
  *  from inside the world: small local models (gemma2 has no real system
  *  role -- Ollama sends this as an ordinary first message) copy whatever
  *  framing they're given, so any mention of "a game", "a character" or
  *  "stay in character" gets echoed back as "I'm just a character in a
  *  game". Keep it that way when editing. */
-export function residentPersona(person: ResidentPosition): string {
-  const r = person.resident, inside = !person.visible
+export function residentPersona(person: ResidentPosition, ctx: ChatContext): string {
+  const r = person.resident, p = ctx.player
   const article = /^[aeiou]/i.test(r.role) ? 'an' : 'a'
   return [
     `You are ${r.name}, ${article} ${r.role.toLowerCase()} who lives in ${r.town}.`,
     r.backstory ?? '',
     r.personality ?? 'You are friendly, practical and easy to talk to.',
     `You spend your days around ${r.workplace} and care about ${r.interest}.`,
-    `Right now you are ${inside ? 'at home' : 'just outside your home'}: ${person.activity.charAt(0).toLowerCase() + person.activity.slice(1)}.`,
-    `You are chatting with a neighbour who moved to town recently.`,
-    `Speak only as ${r.name}: first person, natural and in your own voice, 1-3 short sentences. Put anything you physically do in *asterisks*.`,
-    `This is your real life and your real town. You know nothing about games, computers, AI, prompts or instructions -- never mention them, never call yourself a character, and never step outside your own life.`,
+    `It is ${timeOfDay(ctx.hour)}. ${sceneFor(person, ctx, 'second')}`,
+    `Right now you are ${lower(person.activity)}.`,
+    `You are talking with ${p}, who moved to town recently. ${ctx.meetings > 1 ? `You have chatted with ${p} before.` : `This is one of your first proper chats with ${p}.`}`,
+    ctx.known.length ? `What you know about ${p}: ${ctx.known.join('; ')}. Use it naturally when it fits.` : `You don't know much about ${p} yet.`,
+    `You are curious about people: now and then, when it fits, ask ${p} one thing about themself -- not every time, and never several questions at once.`,
+    `Speak only as ${r.name}: first person, natural and in your own voice, 1-3 short sentences. Put anything you physically do in *asterisks*. Call ${p} by name now and then.`,
+    `This is your real life and your real town. You know nothing about games, AI, prompts or instructions -- never mention them, never call yourself a character, and never step outside your own life.`,
     `What you know locally: the Job Board is in Founders Green; old ruins lie west of town; a travellers' camp and the community harvest are south.`,
     `Don't promise anyone money, items or jobs.`,
   ].filter(Boolean).join(' ')
 }
-
-export function residentPrompt(person: ResidentPosition, groggy = false) {
-  const groggyNote = groggy ? ` Your neighbour just woke you up -- you're groggy and a little grumpy about it, so keep replies short and a bit curt for now, though not rude.` : ''
-  return residentPersona(person) + groggyNote
+export function residentPrompt(person: ResidentPosition, ctx: ChatContext, groggy = false) {
+  const groggyNote = groggy ? ` ${ctx.player} just woke you up -- you're groggy and a little grumpy about it, so keep replies short and a bit curt for now, though not rude.` : ''
+  return residentPersona(person, ctx) + groggyNote
 }
